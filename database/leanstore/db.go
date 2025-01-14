@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"path"
 	"slices"
 	"sync"
 
@@ -15,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/ava-labs/avalanchego/database"
+	"github.com/ava-labs/avalanchego/database/leanstore/overflow"
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/utils/set"
 	"github.com/ava-labs/avalanchego/utils/units"
@@ -44,6 +47,7 @@ var (
 		MaxOpenFiles:                4096,
 		MaxConcurrentCompactions:    1,
 		Sync:                        true,
+		OverflowThresholdSize:       1 * units.KiB,
 	}
 )
 
@@ -53,6 +57,8 @@ type Database struct {
 	closed        bool
 	openIterators set.Set[*iter]
 	writeOptions  *pebble.WriteOptions
+	overflowStore *overflow.Store
+	config        Config
 }
 
 type Config struct {
@@ -64,6 +70,7 @@ type Config struct {
 	MaxOpenFiles                int    `json:"maxOpenFiles"`
 	MaxConcurrentCompactions    int    `json:"maxConcurrentCompactions"`
 	Sync                        bool   `json:"sync"`
+	OverflowThresholdSize       int    `json:"overflowThresholdSize"`
 }
 
 // TODO: Add metrics
@@ -92,11 +99,18 @@ func New(file string, configBytes []byte, log logging.Logger, _ prometheus.Regis
 		zap.Reflect("config", cfg),
 	)
 
+	overflowStore, err := overflow.NewStore(path.Join(file, "overflow"))
+	if err != nil {
+		return nil, err
+	}
+
 	db, err := pebble.Open(file, opts)
 	return &Database{
+		config:        cfg,
 		pebbleDB:      db,
 		openIterators: set.Set[*iter]{},
 		writeOptions:  &pebble.WriteOptions{Sync: cfg.Sync},
+		overflowStore: overflowStore,
 	}, err
 }
 
@@ -116,6 +130,8 @@ func (db *Database) Close() error {
 		iter.lock.Unlock()
 	}
 	db.openIterators.Clear()
+
+	db.overflowStore.Close()
 
 	return updateError(db.pebbleDB.Close())
 }
@@ -160,15 +176,35 @@ func (db *Database) Get(key []byte) ([]byte, error) {
 	if err != nil {
 		return nil, updateError(err)
 	}
-	return slices.Clone(data), closer.Close()
+	defer closer.Close()
+
+	if isRemote(data) {
+		data, err = db.overflowStore.Get(data[1:])
+		if err != nil {
+			return nil, fmt.Errorf("failed to get value from overflow store: %w", err)
+		}
+		return slices.Clone(data), nil
+	}
+
+	return slices.Clone(data[:len(data)-1]), nil
 }
 
 func (db *Database) Put(key []byte, value []byte) error {
-	db.lock.RLock()
-	defer db.lock.RUnlock()
+	db.lock.Lock()
+	defer db.lock.Unlock()
 
 	if db.closed {
 		return database.ErrClosed
+	}
+
+	if len(value) > db.config.OverflowThresholdSize {
+		newValue, err := db.overflowStore.Put(value)
+		if err != nil {
+			return fmt.Errorf("failed to put value in overflow store: %w", err)
+		}
+		value = addMetadataByte(newValue, true)
+	} else {
+		value = addMetadataByte(value, false)
 	}
 
 	return updateError(db.pebbleDB.Set(key, value, db.writeOptions))
@@ -180,6 +216,19 @@ func (db *Database) Delete(key []byte) error {
 
 	if db.closed {
 		return database.ErrClosed
+	}
+
+	// First check if this key has an overflow value that needs cleanup
+	value, closer, err := db.pebbleDB.Get(key)
+	if err == nil {
+		defer closer.Close()
+
+		// If this was an overflow value, clean it up
+		if isRemote(value) {
+			// TODO: Add cleanup of overflow values
+			// This would require adding a Delete method to the overflow store
+			// db.overflowStore.Delete(value[1:])
+		}
 	}
 
 	return updateError(db.pebbleDB.Delete(key, db.writeOptions))
@@ -299,4 +348,16 @@ func prefixToUpperBound(prefix []byte) []byte {
 		}
 	}
 	return nil
+}
+
+func addMetadataByte(value []byte, isRemote bool) []byte {
+	metadataByte := byte(0)
+	if isRemote {
+		metadataByte = 1
+	}
+	return append(value, metadataByte)
+}
+
+func isRemote(value []byte) bool {
+	return value[len(value)-1] == 1
 }

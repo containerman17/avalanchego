@@ -32,11 +32,38 @@ func (db *Database) NewBatch() database.Batch {
 }
 
 func (b *batch) Put(key, value []byte) error {
-	b.size += len(key) + len(value) + pebbleByteOverHead
-	return b.batch.Set(key, value, b.db.writeOptions)
+	var finalValue []byte
+	if len(value) > b.db.config.OverflowThresholdSize {
+		newValue, err := b.db.overflowStore.Put(value)
+		if err != nil {
+			return fmt.Errorf("failed to put value in overflow store: %w", err)
+		}
+		finalValue = addMetadataByte(newValue, true)
+	} else {
+		finalValue = addMetadataByte(value, false)
+	}
+
+	// Calculate size before the value is modified
+	b.size += len(key) + len(value) + pebbleByteOverHead // Use original value length, not final value length
+	return b.batch.Set(key, finalValue, b.db.writeOptions)
 }
 
 func (b *batch) Delete(key []byte) error {
+	// First check if this key has an overflow value that needs cleanup
+	value, closer, err := b.db.pebbleDB.Get(key)
+	if err == nil {
+		defer closer.Close()
+
+		// If this was an overflow value, we should track it for cleanup
+		// Note: In a real implementation, you might want to track these
+		// and clean them up in batch rather than immediately
+		if isRemote(value) {
+			// TODO: Add cleanup of overflow values
+			// This would require adding a Delete method to the overflow store
+			// b.db.overflowStore.Delete(value[1:])
+		}
+	}
+
 	b.size += len(key) + pebbleByteOverHead
 	return b.batch.Delete(key, b.db.writeOptions)
 }
@@ -85,7 +112,9 @@ func (b *batch) Replay(w database.KeyValueWriterDeleter) error {
 		}
 		switch kind {
 		case pebble.InternalKeyKindSet:
-			if err := w.Put(k, v); err != nil {
+			// Remove the metadata byte before replaying
+			originalValue := v[:len(v)-1]
+			if err := w.Put(k, originalValue); err != nil {
 				return err
 			}
 		case pebble.InternalKeyKindDelete:

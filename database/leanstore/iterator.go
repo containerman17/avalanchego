@@ -103,7 +103,19 @@ func (it *iter) Value() []byte {
 	if !it.hasNext {
 		return nil
 	}
-	return slices.Clone(it.nextVal)
+
+	value := slices.Clone(it.nextVal)
+	if isRemote(value) {
+		// Get the actual value from overflow store
+		data, err := it.db.overflowStore.Get(value[1:])
+		if err != nil {
+			it.err = fmt.Errorf("failed to get value from overflow store: %w", err)
+			return nil
+		}
+		return data
+	}
+
+	return value[:len(value)-1] // Remove metadata byte
 }
 
 func (it *iter) Release() {
