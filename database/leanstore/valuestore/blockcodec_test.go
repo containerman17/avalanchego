@@ -1,7 +1,6 @@
 package valuestore
 
 import (
-	"errors"
 	"fmt"
 	"testing"
 
@@ -256,164 +255,62 @@ func TestManyKeys(t *testing.T) {
 	require.Equal(t, []byte{byte(keyCount - 1), 0, 0, 0}, val)
 }
 
-// decodeBlock is a test helper that decodes all key-value pairs from a block
-func decodeBlock(block []byte) ([][]byte, [][]byte, error) {
-	if len(block) < 2 {
-		return nil, nil, errors.New("block too short")
-	}
+func BenchmarkBlockDecoderParallel(b *testing.B) {
+	// Create 1000 different blocks
+	numBlocks := 1000
+	blocks := make([][]byte, numBlocks)
+	numEntriesPerBlock := 99
 
-	blockUsedLen := int(block[0])<<8 | int(block[1])
-	if blockUsedLen > len(block) {
-		return nil, nil, errors.New("invalid block length")
-	}
-
-	// Pre-count entries
-	entries := 0
-	pos := 2
-	for pos < blockUsedLen {
-		pos++ // skip shared
-		keyLen := int(block[pos])
-		pos++
-		valueLen := int(block[pos])<<8 | int(block[pos+1])
-		pos += 2 + keyLen + valueLen
-		entries++
-	}
-
-	// Pre-allocate slices
-	keys := make([][]byte, 0, entries)
-	values := make([][]byte, 0, entries)
-	keyBuf := make([]byte, 96) // We know max key size is 96
-	pos = 2
-	lastKey := keyBuf[:0]
-
-	for pos < blockUsedLen {
-		shared := int(block[pos])
-		pos++
-		keyLen := int(block[pos])
-		pos++
-
-		key := keyBuf[:shared]
-		copy(key, lastKey[:shared])
-		key = append(key, block[pos:pos+keyLen]...)
-		pos += keyLen
-
-		valueLen := int(block[pos])<<8 | int(block[pos+1])
-		pos += 2
-		value := block[pos : pos+valueLen]
-		pos += valueLen
-
-		keyCopy := make([]byte, len(key))
-		copy(keyCopy, key)
-		keys = append(keys, keyCopy)
-		values = append(values, value)
-
-		lastKey = key
-	}
-
-	return keys, values, nil
-}
-
-func BenchmarkDecode16KBBlock(b *testing.B) {
-	// Create shared prefix (64 bytes)
-	sharedPrefix := make([]byte, 64)
-	for i := range sharedPrefix {
-		sharedPrefix[i] = byte(i % 256)
-	}
-
-	// Create test data - calculate how many entries fit in 16KB
-	keySize := 96 // 64 bytes shared + 32 bytes random
-	valueSize := 128
-
-	numEntries := 99
-
-	// Generate keys and values
-	keys := make([][]byte, numEntries)
-	values := make([][]byte, numEntries)
-
-	for i := 0; i < numEntries; i++ {
-		// Create key with shared prefix + random suffix
-		key := make([]byte, keySize)
-		copy(key, sharedPrefix)
-		for j := 64; j < keySize; j++ {
-			key[j] = byte(i * j % 256) // Deterministic but varying
+	for blockIdx := 0; blockIdx < numBlocks; blockIdx++ {
+		// Create different shared prefix for each block
+		sharedPrefix := make([]byte, 64)
+		for i := range sharedPrefix {
+			sharedPrefix[i] = byte((blockIdx * i) % 256)
 		}
-		keys[i] = key
 
-		// Create value
-		value := make([]byte, valueSize)
-		for j := range value {
-			value[j] = byte(i * j % 256)
+		keys := make([][]byte, numEntriesPerBlock)
+		values := make([][]byte, numEntriesPerBlock)
+
+		for i := 0; i < numEntriesPerBlock; i++ {
+			// Create key with shared prefix + random suffix
+			key := make([]byte, 96)
+			copy(key, sharedPrefix)
+			for j := 64; j < 96; j++ {
+				key[j] = byte((blockIdx * i * j) % 256)
+			}
+			keys[i] = key
+
+			// Create value
+			value := make([]byte, 128)
+			for j := range value {
+				value[j] = byte((blockIdx * i * j) % 256)
+			}
+			values[i] = value
 		}
-		values[i] = value
-	}
 
-	// Create the block once before benchmarking
-	block, newBlocks, err := EncodeBlock(nil, keys, values, 16384)
-	if err != nil || len(newBlocks) > 0 {
-		b.Fatalf("Failed to create test block: err=%v newBlocks=%d", err, len(newBlocks))
+		block, newBlocks, err := EncodeBlock(nil, keys, values, 16384)
+		if err != nil || len(newBlocks) > 0 {
+			b.Fatalf("Failed to create test block %d: err=%v newBlocks=%d", blockIdx, err, len(newBlocks))
+		}
+		blocks[blockIdx] = block
 	}
 
 	b.Run("Decode", func(b *testing.B) {
 		b.ResetTimer()
-		b.SetBytes(int64(len(block)))
-		for i := 0; i < b.N; i++ {
-			decodedKeys, decodedValues, err := decodeBlock(block)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if len(decodedKeys) != numEntries || len(decodedValues) != numEntries {
-				b.Fatalf("Incorrect number of entries decoded: got %d, want %d", len(decodedKeys), numEntries)
-			}
-		}
-	})
-}
-
-func BenchmarkDecode16KBBlockParallel(b *testing.B) {
-	// Same setup as BenchmarkDecode16KBBlock
-	sharedPrefix := make([]byte, 64)
-	for i := range sharedPrefix {
-		sharedPrefix[i] = byte(i % 256)
-	}
-
-	keySize := 96
-	valueSize := 128
-	numEntries := 99
-
-	keys := make([][]byte, numEntries)
-	values := make([][]byte, numEntries)
-
-	for i := 0; i < numEntries; i++ {
-		key := make([]byte, keySize)
-		copy(key, sharedPrefix)
-		for j := 64; j < keySize; j++ {
-			key[j] = byte(i * j % 256)
-		}
-		keys[i] = key
-
-		value := make([]byte, valueSize)
-		for j := range value {
-			value[j] = byte(i * j % 256)
-		}
-		values[i] = value
-	}
-
-	block, newBlocks, err := EncodeBlock(nil, keys, values, 16384)
-	if err != nil || len(newBlocks) > 0 {
-		b.Fatalf("Failed to create test block: err=%v newBlocks=%d", err, len(newBlocks))
-	}
-
-	b.Run("Parallel", func(b *testing.B) {
-		b.ResetTimer()
-		b.SetBytes(int64(len(block)))
+		b.SetBytes(int64(len(blocks[0])))
 		b.RunParallel(func(pb *testing.PB) {
+			decoder := NewBlockDecoder()
+			blockIdx := 0
 			for pb.Next() {
-				decodedKeys, decodedValues, err := decodeBlock(block)
+				block := blocks[blockIdx%numBlocks]
+				decodedKeys, decodedValues, err := decoder.Decode(block)
 				if err != nil {
 					b.Fatal(err)
 				}
-				if len(decodedKeys) != numEntries || len(decodedValues) != numEntries {
-					b.Fatalf("Incorrect number of entries decoded: got %d, want %d", len(decodedKeys), numEntries)
+				if len(decodedKeys) != numEntriesPerBlock || len(decodedValues) != numEntriesPerBlock {
+					b.Fatalf("Incorrect number of entries decoded: got %d, want %d", len(decodedKeys), numEntriesPerBlock)
 				}
+				blockIdx++
 			}
 		})
 	})

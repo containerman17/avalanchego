@@ -11,6 +11,110 @@ type NewBlock struct {
 	StartingKey []byte
 }
 
+// Block Layout:
+// [2 bytes]: block length (uint16, big endian)
+// [1 byte]:  shared prefix length
+// [N bytes]: shared prefix bytes
+// Entries:
+//   [1 byte]:  remaining key length
+//   [N bytes]: remaining key bytes (after shared prefix)
+//   [2 bytes]: value length (uint16, big endian)
+//   [M bytes]: value data
+
+// BlockDecoder holds reusable buffers for decoding blocks
+type BlockDecoder struct {
+	keyBuf []byte
+	keys   [][]byte
+	values [][]byte
+}
+
+// NewBlockDecoder creates a decoder with pre-allocated buffers
+func NewBlockDecoder() *BlockDecoder {
+	return &BlockDecoder{
+		keyBuf: make([]byte, 16384), // Initial size
+		keys:   make([][]byte, 0, 99),
+		values: make([][]byte, 0, 99),
+	}
+}
+
+// Decode decodes a block using internal buffers
+func (d *BlockDecoder) Decode(block []byte) ([][]byte, [][]byte, error) {
+	if len(block) < 2 {
+		return nil, nil, errors.New("block too short")
+	}
+
+	blockUsedLen := int(block[0])<<8 | int(block[1])
+	if blockUsedLen > len(block) {
+		return nil, nil, errors.New("invalid block length")
+	}
+
+	// Read block prefix
+	pos := 2
+	prefixLen := int(block[pos])
+	pos++
+	if pos+prefixLen >= blockUsedLen {
+		return nil, nil, errors.New("invalid prefix length")
+	}
+	prefix := block[pos : pos+prefixLen]
+	pos += prefixLen
+
+	// Pre-count entries and calculate total key space needed
+	totalKeySpace := 0
+	scanPos := pos
+	for scanPos < blockUsedLen {
+		if scanPos+1 >= blockUsedLen {
+			break
+		}
+		keyLen := int(block[scanPos])
+		scanPos++
+		if scanPos+keyLen+2 >= blockUsedLen {
+			break
+		}
+		totalKeySpace += prefixLen + keyLen
+		valueLen := int(block[scanPos+keyLen])<<8 | int(block[scanPos+keyLen+1])
+		scanPos += keyLen + 2 + valueLen
+	}
+
+	// Grow key buffer if needed
+	if len(d.keyBuf) < totalKeySpace {
+		d.keyBuf = make([]byte, totalKeySpace)
+	}
+
+	// Reset slices
+	d.keys = d.keys[:0]
+	d.values = d.values[:0]
+	keyBufPos := 0
+
+	// Decode entries
+	for pos < blockUsedLen {
+		keyLen := int(block[pos])
+		pos++
+		if pos+keyLen+2 >= blockUsedLen {
+			break
+		}
+
+		key := d.keyBuf[keyBufPos : keyBufPos+prefixLen+keyLen]
+		copy(key[:prefixLen], prefix)
+		copy(key[prefixLen:], block[pos:pos+keyLen])
+		pos += keyLen
+		keyBufPos += prefixLen + keyLen
+
+		valueLen := int(block[pos])<<8 | int(block[pos+1])
+		pos += 2
+		if pos+valueLen > blockUsedLen {
+			break
+		}
+
+		value := block[pos : pos+valueLen]
+		pos += valueLen
+
+		d.keys = append(d.keys, key)
+		d.values = append(d.values, value)
+	}
+
+	return d.keys, d.values, nil
+}
+
 func EncodeBlock(originalBlock []byte, keys [][]byte, values [][]byte, blockSize int) ([]byte, []NewBlock, error) {
 	if blockSize > 256*256 {
 		return nil, nil, errors.New("block size too large")
@@ -96,26 +200,39 @@ func scanBlockAddKeys(originalBlock []byte, keys [][]byte, values [][]byte) ([][
 		}
 	}
 
+	// Read block prefix
 	pos := 2
-	lastKey := []byte{}
+	prefixLen := int(originalBlock[pos])
+	pos++
+	if pos+prefixLen >= blockUsedLen {
+		return keys, values
+	}
+	prefix := originalBlock[pos : pos+prefixLen]
+	pos += prefixLen
+
 	mergedKeys := make([][]byte, 0)
 	mergedValues := make([][]byte, 0)
 	newKeyIndex := 0
 
 	// Merge sorted original block with sorted new keys
 	for pos < blockUsedLen {
-		shared := int(originalBlock[pos])
-		pos++
 		keyLen := int(originalBlock[pos])
 		pos++
+		if pos+keyLen+2 >= blockUsedLen {
+			break
+		}
 
-		key := make([]byte, shared)
-		copy(key, lastKey[:shared])
-		key = append(key, originalBlock[pos:pos+keyLen]...)
+		// Reconstruct full key
+		key := make([]byte, prefixLen+keyLen)
+		copy(key, prefix)
+		copy(key[prefixLen:], originalBlock[pos:pos+keyLen])
 		pos += keyLen
 
 		valueLen := int(originalBlock[pos])<<8 | int(originalBlock[pos+1])
 		pos += 2
+		if pos+valueLen > blockUsedLen {
+			break
+		}
 		value := make([]byte, valueLen)
 		copy(value, originalBlock[pos:pos+valueLen])
 		pos += valueLen
@@ -137,8 +254,6 @@ func scanBlockAddKeys(originalBlock []byte, keys [][]byte, values [][]byte) ([][
 			mergedKeys = append(mergedKeys, key)
 			mergedValues = append(mergedValues, value)
 		}
-
-		lastKey = key
 	}
 
 	// Add any remaining new keys
@@ -151,10 +266,6 @@ func scanBlockAddKeys(originalBlock []byte, keys [][]byte, values [][]byte) ([][
 	return mergedKeys, mergedValues
 }
 
-const CMP_FIRST_IS_LESS = -1
-const CMP_FIRST_IS_EQUAL = 0
-const CMP_FIRST_IS_GREATER = 1
-
 func FindFloorValue(block []byte, key []byte) (bool, []byte, error) {
 	if len(block) < 2 {
 		return false, nil, errors.New("block too short")
@@ -165,69 +276,121 @@ func FindFloorValue(block []byte, key []byte) (bool, []byte, error) {
 		return false, nil, errors.New("invalid block length")
 	}
 
-	offset := 2 // Start after header
-	lastKey := []byte{}
+	// Read block prefix
+	pos := 2
+	prefixLen := int(block[pos])
+	pos++
+	if pos+prefixLen >= blockUsedLen {
+		return false, nil, errors.New("invalid prefix length")
+	}
+	prefix := block[pos : pos+prefixLen]
+	pos += prefixLen
+
+	// Check if key matches prefix
+	if len(key) < prefixLen {
+		return false, nil, nil // Key too short to match prefix
+	}
+	if !bytes.Equal(key[:prefixLen], prefix) {
+		// Compare prefix to determine if we're before or after all keys
+		cmp := bytes.Compare(key[:prefixLen], prefix)
+		if cmp < 0 {
+			return false, nil, nil // Before all keys
+		}
+		// After all keys, need to scan to find last value
+	}
+
+	// Scan entries
 	found := false
 	var lastValue []byte
 
-	for offset < blockUsedLen {
-		shared := int(block[offset])
-		offset++
-		keyLen := int(block[offset])
-		offset++
+	for pos < blockUsedLen {
+		// Read entry header
+		if pos+1 >= blockUsedLen {
+			break
+		}
+		keyLen := int(block[pos])
+		pos++
 
-		currentKey := make([]byte, shared)
-		copy(currentKey, lastKey[:shared])
-		currentKey = append(currentKey, block[offset:offset+keyLen]...)
-		offset += keyLen
+		// Get remaining key bytes
+		if pos+keyLen+2 >= blockUsedLen {
+			break
+		}
+		remainingKey := block[pos : pos+keyLen]
+		pos += keyLen
 
-		valueLen := int(block[offset])<<8 | int(block[offset+1])
-		offset += 2
-		value := make([]byte, valueLen)
-		copy(value, block[offset:offset+valueLen])
-		offset += valueLen
-
-		cmp := bytes.Compare(currentKey, key)
-		if cmp == CMP_FIRST_IS_EQUAL {
-			return true, value, nil
-		} else if cmp == CMP_FIRST_IS_LESS {
-			found = true
-			lastValue = value
-		} else {
+		// Read value length
+		valueLen := int(block[pos])<<8 | int(block[pos+1])
+		pos += 2
+		if pos+valueLen > blockUsedLen {
 			break
 		}
 
-		lastKey = currentKey
+		// Compare with search key
+		searchRemaining := key[prefixLen:]
+		cmp := bytes.Compare(remainingKey, searchRemaining)
+		if cmp == 0 {
+			// Exact match
+			value := make([]byte, valueLen)
+			copy(value, block[pos:pos+valueLen])
+			return true, value, nil
+		} else if cmp < 0 {
+			// This key is less than search key
+			value := make([]byte, valueLen)
+			copy(value, block[pos:pos+valueLen])
+			found = true
+			lastValue = value
+		} else {
+			// This key is greater than search key
+			break
+		}
+		pos += valueLen
 	}
 
 	if found {
 		return true, lastValue, nil
 	}
-
 	return false, nil, nil
 }
 
 func willItFit(keys [][]byte, values [][]byte, hardMaxSize int) bool {
-	blockSize := 2 // Start with 2 bytes for length
-	lastKey := []byte{}
+	if len(keys) == 0 {
+		return true
+	}
 
+	// Find shared prefix length
+	firstKey := keys[0]
+	prefixLen := len(firstKey)
+	for _, key := range keys[1:] {
+		for i := 0; i < prefixLen; i++ {
+			if i >= len(key) || key[i] != firstKey[i] {
+				prefixLen = i
+				break
+			}
+		}
+		if prefixLen == 0 {
+			break
+		}
+	}
+
+	// Calculate block size: header + prefix + entries
+	blockSize := 2 + 1 + prefixLen // length + prefixLen + prefix
+
+	// Check each entry size
 	for i := 0; i < len(keys); i++ {
 		key := keys[i]
 		value := values[i]
 
-		shared := 0
-		for shared < len(lastKey) && shared < len(key) && lastKey[shared] == key[shared] {
-			shared++
+		remainingKeyLen := len(key) - prefixLen
+		if remainingKeyLen > 255 {
+			return false // Key too long after prefix
 		}
 
-		expectedLen := 1 + 1 + (len(key) - shared) + 2 + len(value) // shared + keylen + key + valuelen + value
-
-		if blockSize+expectedLen > hardMaxSize {
+		entrySize := 1 + remainingKeyLen + 2 + len(value) // keyLen + key + valueLen + value
+		if blockSize+entrySize > hardMaxSize {
 			return false
 		}
 
-		blockSize += expectedLen
-		lastKey = key
+		blockSize += entrySize
 	}
 
 	return true
@@ -235,46 +398,63 @@ func willItFit(keys [][]byte, values [][]byte, hardMaxSize int) bool {
 
 // packs maximum number of keys into set length, stops AFTER reaches preferredMinSize if possible, but not more than hardMaxSize
 func packMaxKeys(keys [][]byte, values [][]byte, preferredMinSize, hardMaxSize int) (int, []byte, error) {
-	block := make([]byte, 2, hardMaxSize)
-	keysPackedLength := 0
+	if len(keys) == 0 {
+		// Empty block with just header
+		return 0, []byte{0, 2}, nil
+	}
 
-	lastKey := []byte{}
-	for i := 0; i < len(keys); i++ {
-		key := keys[i]
-		value := values[i]
-
-		shared := 0
-		for shared < len(lastKey) && shared < len(key) && lastKey[shared] == key[shared] {
-			shared++
+	// Find shared prefix for all keys
+	firstKey := keys[0]
+	prefixLen := len(firstKey)
+	for _, key := range keys[1:] {
+		// Shrink prefix length to match current key
+		for i := 0; i < prefixLen; i++ {
+			if i >= len(key) || key[i] != firstKey[i] {
+				prefixLen = i
+				break
+			}
 		}
-
-		expectedLen := 1 + 1 + (len(key) - shared) + 2 + len(value)
-
-		if len(block)+expectedLen > hardMaxSize {
-			break
-		}
-
-		block = append(block, uint8(shared))
-		block = append(block, uint8(len(key)-shared))
-		block = append(block, key[shared:]...)
-
-		// Encode value length and value
-		block = append(block, byte(len(value)>>8))
-		block = append(block, byte(len(value)))
-		block = append(block, value...)
-
-		lastKey = key
-		keysPackedLength++
-
-		if len(block) >= preferredMinSize {
+		if prefixLen == 0 {
 			break
 		}
 	}
 
-	// Write the block length
-	usedLength := len(block)
-	block[0] = byte(usedLength >> 8)
-	block[1] = byte(usedLength)
+	// Allocate block: 2 bytes length + 1 byte prefixLen + prefix + entries
+	block := make([]byte, 0, hardMaxSize)
+	block = append(block, 0, 0) // Length placeholder
+	block = append(block, byte(prefixLen))
+	block = append(block, firstKey[:prefixLen]...)
+
+	keysPackedLength := 0
+	for i := 0; i < len(keys); i++ {
+		key := keys[i]
+		value := values[i]
+
+		remainingKey := key[prefixLen:]
+		if len(remainingKey) > 255 {
+			return 0, nil, fmt.Errorf("remaining key too long: %d", len(remainingKey))
+		}
+
+		entrySize := 1 + len(remainingKey) + 2 + len(value) // keyLen + key + valueLen + value
+		if len(block)+entrySize > hardMaxSize {
+			break
+		}
+
+		// Add entry
+		block = append(block, byte(len(remainingKey)))
+		block = append(block, remainingKey...)
+		block = append(block, byte(len(value)>>8), byte(len(value)))
+		block = append(block, value...)
+
+		keysPackedLength++
+		if len(block) >= preferredMinSize && i < len(keys)-1 {
+			break
+		}
+	}
+
+	// Write final block length
+	block[0] = byte(len(block) >> 8)
+	block[1] = byte(len(block))
 
 	return keysPackedLength, block, nil
 }
@@ -295,24 +475,39 @@ func GetFirstKeyValue(block []byte) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("block is empty")
 	}
 
-	//no shared prefix
+	// Read prefix
+	prefixLen := int(block[pos])
 	pos++
+	if pos+prefixLen >= blockUsedLen {
+		return nil, nil, fmt.Errorf("invalid prefix length")
+	}
+	prefix := block[pos : pos+prefixLen]
+	pos += prefixLen
+
+	// Read first key
+	if pos >= blockUsedLen {
+		return nil, nil, fmt.Errorf("block has no entries")
+	}
 	keyLen := int(block[pos])
 	pos++
-
 	if pos+keyLen+2 > blockUsedLen {
 		return nil, nil, fmt.Errorf("invalid key length")
 	}
 
-	key := make([]byte, keyLen)
-	copy(key, block[pos:pos+keyLen])
+	// Construct full key
+	key := make([]byte, prefixLen+keyLen)
+	copy(key, prefix)
+	copy(key[prefixLen:], block[pos:pos+keyLen])
 	pos += keyLen
 
+	// Read value
 	valueLen := int(block[pos])<<8 | int(block[pos+1])
 	pos += 2
+	if pos+valueLen > blockUsedLen {
+		return nil, nil, fmt.Errorf("invalid value length")
+	}
 	value := make([]byte, valueLen)
 	copy(value, block[pos:pos+valueLen])
-	pos += valueLen
 
 	return key, value, nil
 }
