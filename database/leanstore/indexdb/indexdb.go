@@ -1,6 +1,7 @@
 package indexdb
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 
@@ -14,6 +15,7 @@ type IndexDB struct {
 const bucketName = "index"
 
 func NewIndexDB(path string) (*IndexDB, error) {
+
 	impl, err := bbolt.Open(path, 0600, nil)
 	if err != nil {
 		return nil, err
@@ -39,14 +41,30 @@ func (i *IndexDB) Delete(key []byte) error {
 	})
 }
 
-func (i *IndexDB) Get(key []byte) (uint32, error) {
+func (i *IndexDB) GetFloorValue(key []byte) (uint32, error) {
 	var value uint32
 	err := i.impl.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
-		v := b.Get(key)
-		if v == nil {
-			return errors.New("key not found")
+		c := b.Cursor()
+
+		// Try to find the key or the next greater one
+		k, v := c.Seek(key)
+
+		// If we found an exact match, return it
+		if k != nil && bytes.Equal(k, key) {
+			value = binary.BigEndian.Uint32(v)
+			return nil
 		}
+
+		// No exact match, get the previous key
+		if k == nil || bytes.Compare(k, key) > 0 {
+			k, v = c.Prev()
+		}
+
+		if k == nil {
+			return errors.New("no floor value found")
+		}
+
 		value = binary.BigEndian.Uint32(v)
 		return nil
 	})
@@ -60,8 +78,9 @@ func (i *IndexDB) Put(keys [][]byte, values []uint32) error {
 
 	return i.impl.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
-		buf := make([]byte, 4)
 		for i := range keys {
+			// Create a new buffer for each value
+			buf := make([]byte, 4)
 			binary.BigEndian.PutUint32(buf, values[i])
 			if err := b.Put(keys[i], buf); err != nil {
 				return err
@@ -69,4 +88,8 @@ func (i *IndexDB) Put(keys [][]byte, values []uint32) error {
 		}
 		return nil
 	})
+}
+
+func (i *IndexDB) Close() error {
+	return i.impl.Close()
 }

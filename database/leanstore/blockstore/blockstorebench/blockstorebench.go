@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ava-labs/avalanchego/database/leanstore/valuestore/blockstore"
+	"github.com/ava-labs/avalanchego/database/leanstore/blockstore"
 )
 
 const (

@@ -26,20 +26,27 @@ func TestKeysWithPrefix(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, newBlocks)
 
-	found, val, err := FindFloorValue(updatedBlock, []byte("aaaaaaaaaaaaa_baaaaaa"))
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, []byte{1, 0, 0, 0}, val)
+	// Test exact matches
+	for i, key := range keys {
+		found, val, err := GetValue(updatedBlock, key)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, values[i], val)
+	}
 
-	found, val, err = FindFloorValue(updatedBlock, []byte("aaaaaaaaaaaaa_zzzzz"))
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, []byte{4, 0, 0, 0}, val)
+	// Test non-existent keys
+	nonExistentKeys := [][]byte{
+		[]byte("aaaaaaaaaaaaa_baaaaaa"),
+		[]byte("aaaaaaaaaaaaa_zzzzz"),
+		[]byte("aaaaaaaaaaaaa_aaaaa"),
+	}
 
-	found, val, err = FindFloorValue(updatedBlock, []byte("aaaaaaaaaaaaa_aaaaa"))
-	require.NoError(t, err)
-	require.False(t, found)
-	require.Nil(t, val)
+	for _, key := range nonExistentKeys {
+		found, val, err := GetValue(updatedBlock, key)
+		require.NoError(t, err)
+		require.False(t, found)
+		require.Nil(t, val)
+	}
 }
 
 func TestCodecSingleBlock(t *testing.T) {
@@ -62,31 +69,28 @@ func TestCodecSingleBlock(t *testing.T) {
 
 	// Test exact matches
 	for i, key := range keys {
-		found, val, err := FindFloorValue(updatedBlock, key)
+		found, val, err := GetValue(updatedBlock, key)
 		require.NoError(t, err)
 		require.True(t, found)
 		require.Equal(t, values[i], val)
 	}
 
-	// Test in-between values
+	// Test non-existent keys
 	tests := []struct {
 		searchKey []byte
 		wantFound bool
-		wantValue []byte
 	}{
-		{[]byte("ant"), false, nil},                   // Before first key
-		{[]byte("apricot"), true, []byte{1, 0, 0, 0}}, // Between apple and banana
-		{[]byte("cat"), true, []byte{2, 0, 0, 0}},     // Between banana and cherry
-		{[]byte("zebra"), true, []byte{4, 0, 0, 0}},   // After last key
+		{[]byte("ant"), false},     // Before first key
+		{[]byte("apricot"), false}, // Between apple and banana
+		{[]byte("cat"), false},     // Between banana and cherry
+		{[]byte("zebra"), false},   // After last key
 	}
 
 	for _, tt := range tests {
-		found, val, err := FindFloorValue(updatedBlock, tt.searchKey)
+		found, val, err := GetValue(updatedBlock, tt.searchKey)
 		require.NoError(t, err)
-		require.Equalf(t, tt.wantFound, found, "searchKey: %s", tt.searchKey)
-		if found {
-			require.Equalf(t, tt.wantValue, val, "searchKey: %s", tt.searchKey)
-		}
+		require.False(t, found)
+		require.Nil(t, val)
 	}
 }
 
@@ -116,18 +120,20 @@ func TestCodecTwoBlocks(t *testing.T) {
 		wantFound bool
 		wantValue []byte
 	}{
-		{[]byte("ant"), false, nil},                   // Before first key
-		{[]byte("apple"), true, []byte{1, 0, 0, 0}},   // First key
-		{[]byte("banana"), true, []byte{2, 0, 0, 0}},  // Second key
-		{[]byte("between"), true, []byte{2, 0, 0, 0}}, // After second key
+		{[]byte("apple"), true, []byte{1, 0, 0, 0}},  // First key
+		{[]byte("banana"), true, []byte{2, 0, 0, 0}}, // Second key
+		{[]byte("ant"), false, nil},                  // Before first key
+		{[]byte("between"), false, nil},              // Non-existent key
 	}
 
 	for _, tt := range firstBlockTests {
-		found, val, err := FindFloorValue(updatedBlock, tt.searchKey)
-		require.NoError(t, err, "First block - FindFloorValue failed for key %s", tt.searchKey)
+		found, val, err := GetValue(updatedBlock, tt.searchKey)
+		require.NoError(t, err, "First block - GetValue failed for key %s", tt.searchKey)
 		require.Equal(t, tt.wantFound, found, "First block - For key %s", tt.searchKey)
 		if found {
 			require.Equal(t, tt.wantValue, val, "First block - For key %s", tt.searchKey)
+		} else {
+			require.Nil(t, val)
 		}
 	}
 
@@ -139,15 +145,18 @@ func TestCodecTwoBlocks(t *testing.T) {
 	}{
 		{[]byte("cherry"), true, []byte{3, 0, 0, 0}}, // First key in second block
 		{[]byte("date"), true, []byte{4, 0, 0, 0}},   // Last key
-		{[]byte("zebra"), true, []byte{4, 0, 0, 0}},  // After last key
+		{[]byte("dog"), false, nil},                  // Non-existent key
+		{[]byte("zebra"), false, nil},                // After last key
 	}
 
 	for _, tt := range secondBlockTests {
-		found, val, err := FindFloorValue(newBlocks[0].Block, tt.searchKey)
-		require.NoError(t, err, "Second block - FindFloorValue failed for key %s", tt.searchKey)
+		found, val, err := GetValue(newBlocks[0].Block, tt.searchKey)
+		require.NoError(t, err, "Second block - GetValue failed for key %s", tt.searchKey)
 		require.Equal(t, tt.wantFound, found, "Second block - For key %s", tt.searchKey)
 		if found {
 			require.Equal(t, tt.wantValue, val, "Second block - For key %s", tt.searchKey)
+		} else {
+			require.Nil(t, val)
 		}
 	}
 }
@@ -205,15 +214,17 @@ func TestCodecInsertMerge(t *testing.T) {
 		{[]byte("fig"), true, []byte{60, 0, 0, 0}},    // Updated value
 		{[]byte("grape"), true, []byte{70, 0, 0, 0}},  // New key
 		{[]byte("ant"), false, nil},                   // Before first key
-		{[]byte("zebra"), true, []byte{70, 0, 0, 0}},  // After last key
+		{[]byte("zebra"), false, nil},                 // After last key
 	}
 
 	for _, tt := range tests {
-		found, val, err := FindFloorValue(updatedBlock, tt.searchKey)
+		found, val, err := GetValue(updatedBlock, tt.searchKey)
 		require.NoError(t, err)
 		require.Equal(t, tt.wantFound, found, "for key: %s", tt.searchKey)
 		if found {
 			require.Equal(t, tt.wantValue, val, "for key: %s", tt.searchKey)
+		} else {
+			require.Nil(t, val)
 		}
 	}
 }
@@ -242,14 +253,14 @@ func TestManyKeys(t *testing.T) {
 	}
 
 	// Test first block
-	found, val, err := FindFloorValue(updatedBlock, keys[0])
+	found, val, err := GetValue(updatedBlock, keys[0])
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, values[0], val)
 
 	// Test last block
 	lastBlock := newBlocks[len(newBlocks)-1].Block
-	found, val, err = FindFloorValue(lastBlock, keyGenerator(keyCount-1))
+	found, val, err = GetValue(lastBlock, keyGenerator(keyCount-1))
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, []byte{byte(keyCount - 1), 0, 0, 0}, val)

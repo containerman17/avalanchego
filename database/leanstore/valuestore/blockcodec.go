@@ -266,92 +266,6 @@ func scanBlockAddKeys(originalBlock []byte, keys [][]byte, values [][]byte) ([][
 	return mergedKeys, mergedValues
 }
 
-func FindFloorValue(block []byte, key []byte) (bool, []byte, error) {
-	if len(block) < 2 {
-		return false, nil, errors.New("block too short")
-	}
-
-	blockUsedLen := int(block[0])<<8 | int(block[1])
-	if blockUsedLen > len(block) {
-		return false, nil, errors.New("invalid block length")
-	}
-
-	// Read block prefix
-	pos := 2
-	prefixLen := int(block[pos])
-	pos++
-	if pos+prefixLen >= blockUsedLen {
-		return false, nil, errors.New("invalid prefix length")
-	}
-	prefix := block[pos : pos+prefixLen]
-	pos += prefixLen
-
-	// Check if key matches prefix
-	if len(key) < prefixLen {
-		return false, nil, nil // Key too short to match prefix
-	}
-	if !bytes.Equal(key[:prefixLen], prefix) {
-		// Compare prefix to determine if we're before or after all keys
-		cmp := bytes.Compare(key[:prefixLen], prefix)
-		if cmp < 0 {
-			return false, nil, nil // Before all keys
-		}
-		// After all keys, need to scan to find last value
-	}
-
-	// Scan entries
-	found := false
-	var lastValue []byte
-
-	for pos < blockUsedLen {
-		// Read entry header
-		if pos+1 >= blockUsedLen {
-			break
-		}
-		keyLen := int(block[pos])
-		pos++
-
-		// Get remaining key bytes
-		if pos+keyLen+2 >= blockUsedLen {
-			break
-		}
-		remainingKey := block[pos : pos+keyLen]
-		pos += keyLen
-
-		// Read value length
-		valueLen := int(block[pos])<<8 | int(block[pos+1])
-		pos += 2
-		if pos+valueLen > blockUsedLen {
-			break
-		}
-
-		// Compare with search key
-		searchRemaining := key[prefixLen:]
-		cmp := bytes.Compare(remainingKey, searchRemaining)
-		if cmp == 0 {
-			// Exact match
-			value := make([]byte, valueLen)
-			copy(value, block[pos:pos+valueLen])
-			return true, value, nil
-		} else if cmp < 0 {
-			// This key is less than search key
-			value := make([]byte, valueLen)
-			copy(value, block[pos:pos+valueLen])
-			found = true
-			lastValue = value
-		} else {
-			// This key is greater than search key
-			break
-		}
-		pos += valueLen
-	}
-
-	if found {
-		return true, lastValue, nil
-	}
-	return false, nil, nil
-}
-
 func willItFit(keys [][]byte, values [][]byte, hardMaxSize int) bool {
 	if len(keys) == 0 {
 		return true
@@ -459,55 +373,64 @@ func packMaxKeys(keys [][]byte, values [][]byte, preferredMinSize, hardMaxSize i
 	return keysPackedLength, block, nil
 }
 
-// GetFirstKeyValue returns the first key-value pair in a block
-func GetFirstKeyValue(block []byte) ([]byte, []byte, error) {
+func GetValue(block []byte, key []byte) (bool, []byte, error) {
 	if len(block) < 2 {
-		return nil, nil, fmt.Errorf("block too short")
+		return false, nil, errors.New("block too short")
 	}
 
 	blockUsedLen := int(block[0])<<8 | int(block[1])
 	if blockUsedLen > len(block) {
-		return nil, nil, fmt.Errorf("invalid block length")
+		return false, nil, errors.New("invalid block length")
 	}
 
+	// Read block prefix
 	pos := 2
-	if pos >= blockUsedLen {
-		return nil, nil, fmt.Errorf("block is empty")
-	}
-
-	// Read prefix
 	prefixLen := int(block[pos])
 	pos++
 	if pos+prefixLen >= blockUsedLen {
-		return nil, nil, fmt.Errorf("invalid prefix length")
+		return false, nil, errors.New("invalid prefix length")
 	}
 	prefix := block[pos : pos+prefixLen]
 	pos += prefixLen
 
-	// Read first key
-	if pos >= blockUsedLen {
-		return nil, nil, fmt.Errorf("block has no entries")
+	// Check if key matches prefix
+	if len(key) < prefixLen {
+		return false, nil, nil // Key too short to match prefix
 	}
-	keyLen := int(block[pos])
-	pos++
-	if pos+keyLen+2 > blockUsedLen {
-		return nil, nil, fmt.Errorf("invalid key length")
+	if !bytes.Equal(key[:prefixLen], prefix) {
+		return false, nil, nil // Prefix doesn't match
 	}
 
-	// Construct full key
-	key := make([]byte, prefixLen+keyLen)
-	copy(key, prefix)
-	copy(key[prefixLen:], block[pos:pos+keyLen])
-	pos += keyLen
+	// Scan entries for exact match
+	searchRemaining := key[prefixLen:]
+	for pos < blockUsedLen {
+		if pos+1 >= blockUsedLen {
+			break
+		}
+		keyLen := int(block[pos])
+		pos++
 
-	// Read value
-	valueLen := int(block[pos])<<8 | int(block[pos+1])
-	pos += 2
-	if pos+valueLen > blockUsedLen {
-		return nil, nil, fmt.Errorf("invalid value length")
+		if pos+keyLen+2 >= blockUsedLen {
+			break
+		}
+		remainingKey := block[pos : pos+keyLen]
+		pos += keyLen
+
+		valueLen := int(block[pos])<<8 | int(block[pos+1])
+		pos += 2
+		if pos+valueLen > blockUsedLen {
+			break
+		}
+
+		// Compare with search key
+		if bytes.Equal(remainingKey, searchRemaining) {
+			// Exact match
+			value := make([]byte, valueLen)
+			copy(value, block[pos:pos+valueLen])
+			return true, value, nil
+		}
+		pos += valueLen
 	}
-	value := make([]byte, valueLen)
-	copy(value, block[pos:pos+valueLen])
 
-	return key, value, nil
+	return false, nil, nil
 }
