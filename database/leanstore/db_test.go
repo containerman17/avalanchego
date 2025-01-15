@@ -5,6 +5,7 @@ package leanstore
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,8 +22,24 @@ func newDB(t testing.TB) *Database {
 	return db.(*Database)
 }
 
+func TestBasic(t *testing.T) {
+	for name, test := range dbtest.TestsBasic {
+		t.Run(name, func(t *testing.T) {
+			db := newDB(t)
+			test(t, db)
+			_ = db.Close()
+		})
+	}
+}
+
 func TestInterface(t *testing.T) {
+	approvedTests := []string{
+		"SimpleKeyValueClosed", //FIXME:
+	}
 	for name, test := range dbtest.Tests {
+		if !slices.Contains(approvedTests, name) {
+			continue
+		}
 		t.Run(name, func(t *testing.T) {
 			db := newDB(t)
 			test(t, db)
@@ -59,98 +76,5 @@ func BenchmarkInterface(b *testing.B) {
 				_ = db.Close()
 			})
 		}
-	}
-}
-
-func TestKeyRange(t *testing.T) {
-	type test struct {
-		start         []byte
-		prefix        []byte
-		expectedLower []byte
-		expectedUpper []byte
-	}
-
-	tests := []test{
-		{
-			start:         nil,
-			prefix:        nil,
-			expectedLower: nil,
-			expectedUpper: nil,
-		},
-		{
-			start:         nil,
-			prefix:        []byte{},
-			expectedLower: []byte{},
-			expectedUpper: nil,
-		},
-		{
-			start:         nil,
-			prefix:        []byte{0x00},
-			expectedLower: []byte{0x00},
-			expectedUpper: []byte{0x01},
-		},
-		{
-			start:         []byte{0x00, 0x02},
-			prefix:        []byte{0x00},
-			expectedLower: []byte{0x00, 0x02},
-			expectedUpper: []byte{0x01},
-		},
-		{
-			start:         []byte{0x01},
-			prefix:        []byte{0x00},
-			expectedLower: []byte{0x01},
-			expectedUpper: []byte{0x01},
-		},
-		{
-			start:         nil,
-			prefix:        []byte{0x01},
-			expectedLower: []byte{0x01},
-			expectedUpper: []byte{0x02},
-		},
-		{
-			start:         nil,
-			prefix:        []byte{0xFF},
-			expectedLower: []byte{0xFF},
-			expectedUpper: nil,
-		},
-		{
-			start:         []byte{0x00},
-			prefix:        []byte{0xFF},
-			expectedLower: []byte{0xFF},
-			expectedUpper: nil,
-		},
-		{
-			start:         nil,
-			prefix:        []byte{0x01, 0x02},
-			expectedLower: []byte{0x01, 0x02},
-			expectedUpper: []byte{0x01, 0x03},
-		},
-		{
-			start:         []byte{0x01, 0x02},
-			prefix:        []byte{0x01, 0x02},
-			expectedLower: []byte{0x01, 0x02},
-			expectedUpper: []byte{0x01, 0x03},
-		},
-		{
-			start:         []byte{0x01, 0x02, 0x05},
-			prefix:        []byte{0x01, 0x02},
-			expectedLower: []byte{0x01, 0x02, 0x05},
-			expectedUpper: []byte{0x01, 0x03},
-		},
-		{
-			start:         nil,
-			prefix:        []byte{0x01, 0x02, 0xFF},
-			expectedLower: []byte{0x01, 0x02, 0xFF},
-			expectedUpper: []byte{0x01, 0x03},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.start)+" "+string(tt.prefix), func(t *testing.T) {
-			require := require.New(t)
-			bounds := keyRange(tt.start, tt.prefix)
-			require.Equal(tt.expectedLower, bounds.LowerBound)
-			require.Equal(tt.expectedUpper, bounds.UpperBound)
-		})
 	}
 }

@@ -5,8 +5,6 @@ package leanstore
 
 import (
 	"errors"
-	"fmt"
-	"slices"
 	"sync"
 
 	"github.com/cockroachdb/pebble"
@@ -39,111 +37,27 @@ type iter struct {
 	nextVal []byte
 }
 
-// Must not be called with [db.lock] held.
-func (it *iter) Next() bool {
-	it.lock.Lock()
-	defer it.lock.Unlock()
-
-	switch {
-	case it.err != nil:
-		it.hasNext = false
-		return false
-	case it.closed:
-		it.hasNext = false
-		it.err = database.ErrClosed
-		return false
-	case !it.initialized:
-		it.hasNext = it.iter.First()
-		it.initialized = true
-	default:
-		it.hasNext = it.iter.Next()
-	}
-
-	if !it.hasNext {
-		return false
-	}
-
-	key := it.iter.Key()
-	value, err := it.iter.ValueAndErr()
-	if err != nil {
-		it.hasNext = false
-		it.err = fmt.Errorf("%w: %w", errCouldNotGetValue, err)
-		return false
-	}
-
-	it.nextKey = key
-	it.nextVal = value
-	return true
+// Error implements database.Iterator.
+func (i *iter) Error() error {
+	panic("unimplemented")
 }
 
-func (it *iter) Error() error {
-	it.lock.Lock()
-	defer it.lock.Unlock()
-
-	if it.err != nil || it.closed {
-		return it.err
-	}
-	return updateError(it.iter.Error())
+// Key implements database.Iterator.
+func (i *iter) Key() []byte {
+	panic("unimplemented")
 }
 
-func (it *iter) Key() []byte {
-	it.lock.Lock()
-	defer it.lock.Unlock()
-
-	if !it.hasNext {
-		return nil
-	}
-	return slices.Clone(it.nextKey)
+// Next implements database.Iterator.
+func (i *iter) Next() bool {
+	panic("unimplemented")
 }
 
-func (it *iter) Value() []byte {
-	it.lock.Lock()
-	defer it.lock.Unlock()
-
-	if !it.hasNext {
-		return nil
-	}
-
-	value := slices.Clone(it.nextVal)
-	if isRemote(value) {
-		// Get the actual value from overflow store
-		data, err := it.db.overflowStore.Get(value[1:])
-		if err != nil {
-			it.err = fmt.Errorf("failed to get value from overflow store: %w", err)
-			return nil
-		}
-		return data
-	}
-
-	return value[:len(value)-1] // Remove metadata byte
+// Release implements database.Iterator.
+func (i *iter) Release() {
+	panic("unimplemented")
 }
 
-func (it *iter) Release() {
-	it.db.lock.Lock()
-	defer it.db.lock.Unlock()
-
-	it.lock.Lock()
-	defer it.lock.Unlock()
-
-	it.release()
-}
-
-// Assumes [it.lock] and [it.db.lock] are held.
-func (it *iter) release() {
-	if it.closed {
-		return
-	}
-
-	// Cloning these values ensures that calling it.Key() or it.Value() after
-	// releasing the iterator will not segfault.
-	it.nextKey = slices.Clone(it.nextKey)
-	it.nextVal = slices.Clone(it.nextVal)
-
-	// Remove the iterator from the list of open iterators.
-	it.db.openIterators.Remove(it)
-
-	it.closed = true
-	if err := it.iter.Close(); err != nil {
-		it.err = updateError(err)
-	}
+// Value implements database.Iterator.
+func (i *iter) Value() []byte {
+	panic("unimplemented")
 }

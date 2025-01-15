@@ -3,6 +3,7 @@ package valuestore
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -24,6 +25,11 @@ type ValueStore struct {
 }
 
 func NewValueStore(dir string, blockSize int) (*ValueStore, error) {
+	err := os.MkdirAll(dir, 0755)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create directory: %w", err)
+	}
+
 	blockStore, err := blockstore.CreateRegularBlockStore(dir+"/blocks.db", blockSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create block store: %w", err)

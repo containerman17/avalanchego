@@ -9,22 +9,21 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"slices"
-	"sync"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 
 	"github.com/ava-labs/avalanchego/database"
+	"github.com/ava-labs/avalanchego/database/leanstore/backedbuffer"
 	"github.com/ava-labs/avalanchego/database/leanstore/overflow"
+	"github.com/ava-labs/avalanchego/database/leanstore/valuemeta"
+	"github.com/ava-labs/avalanchego/database/leanstore/valuestore"
 	"github.com/ava-labs/avalanchego/utils/logging"
-	"github.com/ava-labs/avalanchego/utils/set"
 	"github.com/ava-labs/avalanchego/utils/units"
 )
 
 const (
-	Name = "pebbledb"
+	Name = "leanstore"
 
 	// pebbleByteOverHead is the number of bytes of constant overhead that
 	// should be added to a batch size per operation.
@@ -39,41 +38,24 @@ var (
 	errInvalidOperation = errors.New("invalid operation")
 
 	DefaultConfig = Config{
-		CacheSize:                   defaultCacheSize,
-		BytesPerSync:                512 * units.KiB,
-		WALBytesPerSync:             0, // Default to no background syncing.
-		MemTableStopWritesThreshold: 8,
-		MemTableSize:                defaultCacheSize / 4,
-		MaxOpenFiles:                4096,
-		MaxConcurrentCompactions:    1,
-		Sync:                        true,
-		OverflowThresholdSize:       1 * units.KiB,
+		BlockSize:             16 * units.KiB,
+		OverflowThresholdSize: 1 * units.KiB,
 	}
 )
 
 type Database struct {
-	lock          sync.RWMutex
-	pebbleDB      *pebble.DB
 	closed        bool
-	openIterators set.Set[*iter]
-	writeOptions  *pebble.WriteOptions
-	overflowStore *overflow.Store
+	backedBuffer1 *backedbuffer.BackedBuffer
 	config        Config
+	overflowStore *overflow.Store
+	valueStore    *valuestore.ValueStore
 }
 
 type Config struct {
-	CacheSize                   int64  `json:"cacheSize"`
-	BytesPerSync                int    `json:"bytesPerSync"`
-	WALBytesPerSync             int    `json:"walBytesPerSync"` // 0 means no background syncing
-	MemTableStopWritesThreshold int    `json:"memTableStopWritesThreshold"`
-	MemTableSize                uint64 `json:"memTableSize"`
-	MaxOpenFiles                int    `json:"maxOpenFiles"`
-	MaxConcurrentCompactions    int    `json:"maxConcurrentCompactions"`
-	Sync                        bool   `json:"sync"`
-	OverflowThresholdSize       int    `json:"overflowThresholdSize"`
+	OverflowThresholdSize int `json:"overflowThresholdSize"`
+	BlockSize             int `json:"blockSize"`
 }
 
-// TODO: Add metrics
 func New(file string, configBytes []byte, log logging.Logger, _ prometheus.Registerer) (database.Database, error) {
 	cfg := DefaultConfig
 	if len(configBytes) > 0 {
@@ -82,20 +64,8 @@ func New(file string, configBytes []byte, log logging.Logger, _ prometheus.Regis
 		}
 	}
 
-	opts := &pebble.Options{
-		Cache:                       pebble.NewCache(cfg.CacheSize),
-		BytesPerSync:                cfg.BytesPerSync,
-		Comparer:                    pebble.DefaultComparer,
-		WALBytesPerSync:             cfg.WALBytesPerSync,
-		MemTableStopWritesThreshold: cfg.MemTableStopWritesThreshold,
-		MemTableSize:                cfg.MemTableSize,
-		MaxOpenFiles:                cfg.MaxOpenFiles,
-		MaxConcurrentCompactions:    func() int { return cfg.MaxConcurrentCompactions },
-	}
-	opts.Experimental.ReadSamplingMultiplier = -1 // Disable seek compaction
-
 	log.Info(
-		"opening pebble",
+		"opening leanstore",
 		zap.Reflect("config", cfg),
 	)
 
@@ -104,42 +74,45 @@ func New(file string, configBytes []byte, log logging.Logger, _ prometheus.Regis
 		return nil, err
 	}
 
-	db, err := pebble.Open(file, opts)
+	backedBuffer1, err := backedbuffer.New(path.Join(file, "backedbuffer1"))
+	if err != nil {
+		return nil, err
+	}
+
+	valStore, err := valuestore.NewValueStore(path.Join(file, "valuestore"), cfg.BlockSize)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Database{
 		config:        cfg,
-		pebbleDB:      db,
-		openIterators: set.Set[*iter]{},
-		writeOptions:  &pebble.WriteOptions{Sync: cfg.Sync},
 		overflowStore: overflowStore,
-	}, err
+		backedBuffer1: backedBuffer1,
+		valueStore:    valStore,
+	}, nil
 }
 
 func (db *Database) Close() error {
-	db.lock.Lock()
-	defer db.lock.Unlock()
-
 	if db.closed {
 		return database.ErrClosed
 	}
 
 	db.closed = true
 
-	for iter := range db.openIterators {
-		iter.lock.Lock()
-		iter.release()
-		iter.lock.Unlock()
+	err := db.backedBuffer1.Close()
+	if err != nil {
+		return err
 	}
-	db.openIterators.Clear()
 
-	db.overflowStore.Close()
+	err = db.overflowStore.Close()
+	if err != nil {
+		return err
+	}
 
-	return updateError(db.pebbleDB.Close())
+	return nil
 }
 
 func (db *Database) HealthCheck(_ context.Context) (interface{}, error) {
-	db.lock.RLock()
-	defer db.lock.RUnlock()
-
 	if db.closed {
 		return nil, database.ErrClosed
 	}
@@ -147,128 +120,122 @@ func (db *Database) HealthCheck(_ context.Context) (interface{}, error) {
 }
 
 func (db *Database) Has(key []byte) (bool, error) {
-	db.lock.RLock()
-	defer db.lock.RUnlock()
-
 	if db.closed {
 		return false, database.ErrClosed
 	}
 
-	_, closer, err := db.pebbleDB.Get(key)
-	if err == pebble.ErrNotFound {
-		return false, nil
-	}
+	// Check in backedBuffer1
+	has, err := db.backedBuffer1.Has(key)
 	if err != nil {
-		return false, updateError(err)
+		return false, err
 	}
-	return true, closer.Close()
+
+	if has {
+		// If the key exists in backedBuffer1, we need to check if it's a tombstone
+		value, err := db.backedBuffer1.Get(key)
+		if err != nil {
+			return false, err
+		}
+		if valuemeta.IsTombstone(value) {
+			fmt.Printf("Has key=%x tombstone\n", key)
+			return false, nil
+		}
+		fmt.Printf("Has key=%x\n", key)
+		return true, nil
+	}
+
+	has, err = db.valueStore.Has(key)
+	if err != nil {
+		return false, err
+	}
+	fmt.Printf("Has key=%x from valueStore: %t\n", key, has)
+	return has, nil
 }
 
 func (db *Database) Get(key []byte) ([]byte, error) {
-	db.lock.RLock()
-	defer db.lock.RUnlock()
-
 	if db.closed {
 		return nil, database.ErrClosed
 	}
 
-	data, closer, err := db.pebbleDB.Get(key)
+	var value []byte
+	var err error
+
+	//check in the temp store1
+	value, err = db.backedBuffer1.Get(key)
 	if err != nil {
-		return nil, updateError(err)
-	}
-	defer closer.Close()
-
-	if isRemote(data) {
-		data, err = db.overflowStore.Get(data[1:])
-		if err != nil {
-			return nil, fmt.Errorf("failed to get value from overflow store: %w", err)
-		}
-		return slices.Clone(data), nil
+		return nil, err
 	}
 
-	return slices.Clone(data[:len(data)-1]), nil
+	if value != nil {
+		return db.untangleRemote(value)
+	}
+
+	//TODO: check in the temp store2 when implemented
+
+	//get from the main store
+	value, err = db.valueStore.Get(key)
+	if err != nil {
+		return nil, err
+	}
+
+	if value == nil {
+		return nil, database.ErrNotFound
+	}
+
+	return db.untangleRemote(value)
+}
+
+func (db *Database) untangleRemote(value []byte) ([]byte, error) {
+	if value == nil {
+		panic("implementation error: value is nil in untangleRemote")
+	}
+
+	if valuemeta.IsTombstone(value) {
+		return nil, database.ErrNotFound
+	}
+
+	// Strip off the metadata byte for non-remote values
+	if !valuemeta.IsRemote(value) {
+		return value[1:], nil
+	}
+
+	// For remote values, get from overflow store
+	return db.overflowStore.Get(value[1:])
 }
 
 func (db *Database) Put(key []byte, value []byte) error {
-	db.lock.Lock()
-	defer db.lock.Unlock()
-
 	if db.closed {
 		return database.ErrClosed
 	}
 
+	var metadataByte byte
 	if len(value) > db.config.OverflowThresholdSize {
-		newValue, err := db.overflowStore.Put(value)
-		if err != nil {
-			return fmt.Errorf("failed to put value in overflow store: %w", err)
-		}
-		value = addMetadataByte(newValue, true)
+		metadataByte = valuemeta.Remote
 	} else {
-		value = addMetadataByte(value, false)
+		metadataByte = valuemeta.NoFlags
 	}
 
-	return updateError(db.pebbleDB.Set(key, value, db.writeOptions))
+	valueWithMeta := make([]byte, len(value)+1)
+	valueWithMeta[0] = metadataByte
+	copy(valueWithMeta[1:], value)
+
+	fmt.Printf("Put key=%x value=%x\n", key, valueWithMeta)
+
+	return db.backedBuffer1.Put([][]byte{key}, [][]byte{valueWithMeta})
 }
 
 func (db *Database) Delete(key []byte) error {
-	db.lock.RLock()
-	defer db.lock.RUnlock()
-
 	if db.closed {
 		return database.ErrClosed
 	}
 
-	// First check if this key has an overflow value that needs cleanup
-	value, closer, err := db.pebbleDB.Get(key)
-	if err == nil {
-		defer closer.Close()
+	fmt.Printf("Delete key=%x\n", key)
 
-		// If this was an overflow value, clean it up
-		if isRemote(value) {
-			// TODO: Add cleanup of overflow values
-			// This would require adding a Delete method to the overflow store
-			// db.overflowStore.Delete(value[1:])
-		}
-	}
-
-	return updateError(db.pebbleDB.Delete(key, db.writeOptions))
+	return db.backedBuffer1.Put([][]byte{key}, [][]byte{{valuemeta.Tombstone}})
 }
 
 func (db *Database) Compact(start []byte, end []byte) error {
-	db.lock.RLock()
-	defer db.lock.RUnlock()
-
-	if db.closed {
-		return database.ErrClosed
-	}
-
-	if end == nil {
-		// The database.Database spec treats a nil [limit] as a key after all
-		// keys but pebble treats a nil [limit] as a key before all keys in
-		// Compact. Use the greatest key in the database as the [limit] to get
-		// the desired behavior.
-		it, err := db.pebbleDB.NewIter(&pebble.IterOptions{})
-		if err != nil {
-			return updateError(err)
-		}
-
-		if !it.Last() {
-			// The database is empty.
-			return it.Close()
-		}
-
-		end = slices.Clone(it.Key())
-		if err := it.Close(); err != nil {
-			return err
-		}
-	}
-
-	if pebble.DefaultComparer.Compare(start, end) >= 1 {
-		// pebble requires [start] < [end]
-		return nil
-	}
-
-	return updateError(db.pebbleDB.Compact(start, end, true /* parallelize */))
+	return nil //no need for compaction
 }
 
 func (db *Database) NewIterator() database.Iterator {
@@ -284,80 +251,5 @@ func (db *Database) NewIteratorWithPrefix(prefix []byte) database.Iterator {
 }
 
 func (db *Database) NewIteratorWithStartAndPrefix(start, prefix []byte) database.Iterator {
-	db.lock.Lock()
-	defer db.lock.Unlock()
-
-	if db.closed {
-		return &iter{
-			db:     db,
-			closed: true,
-			err:    database.ErrClosed,
-		}
-	}
-
-	it, err := db.pebbleDB.NewIter(keyRange(start, prefix))
-	if err != nil {
-		return &iter{
-			db:     db,
-			closed: true,
-			err:    updateError(err),
-		}
-	}
-
-	iter := &iter{
-		db:   db,
-		iter: it,
-	}
-	db.openIterators.Add(iter)
-	return iter
-}
-
-// Converts a pebble-specific error to its Avalanche equivalent, if applicable.
-func updateError(err error) error {
-	switch err {
-	case pebble.ErrClosed:
-		return database.ErrClosed
-	case pebble.ErrNotFound:
-		return database.ErrNotFound
-	default:
-		return err
-	}
-}
-
-func keyRange(start, prefix []byte) *pebble.IterOptions {
-	opt := &pebble.IterOptions{
-		LowerBound: prefix,
-		UpperBound: prefixToUpperBound(prefix),
-	}
-	if pebble.DefaultComparer.Compare(start, prefix) == 1 {
-		opt.LowerBound = start
-	}
-	return opt
-}
-
-// Returns an upper bound that stops after all keys with the given [prefix].
-// Assumes the Database uses bytes.Compare for key comparison and not a custom
-// comparer.
-func prefixToUpperBound(prefix []byte) []byte {
-	for i := len(prefix) - 1; i >= 0; i-- {
-		if prefix[i] != 0xFF {
-			upperBound := make([]byte, i+1)
-			copy(upperBound, prefix)
-			upperBound[i]++
-			return upperBound
-		}
-	}
-	return nil
-}
-
-func addMetadataByte(value []byte, isRemote bool) []byte {
-	metadataByte := byte(0)
-	if isRemote {
-		metadataByte = 1
-	}
-	return append(value, metadataByte)
-}
-
-func isRemote(value []byte) bool {
-	return value[len(value)-1] == 1
+	panic("not implemented")
 }

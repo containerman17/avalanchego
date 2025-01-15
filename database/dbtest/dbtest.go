@@ -185,7 +185,7 @@ func TestSimpleKeyValueClosed(t *testing.T, db database.Database) {
 
 	has, err := db.Has(key)
 	require.NoError(err)
-	require.False(has)
+	require.False(has, "first db.Has has to be false")
 
 	_, err = db.Get(key)
 	require.Equal(database.ErrNotFound, err)
@@ -195,7 +195,7 @@ func TestSimpleKeyValueClosed(t *testing.T, db database.Database) {
 
 	has, err = db.Has(key)
 	require.NoError(err)
-	require.True(has)
+	require.True(has, "second db.Has has to be true")
 
 	v, err := db.Get(key)
 	require.NoError(err)

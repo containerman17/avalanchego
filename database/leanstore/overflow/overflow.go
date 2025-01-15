@@ -75,10 +75,13 @@ func NewStore(path string) (*Store, error) {
 	return NewStoreWithCapacity(path, AddressSpaceSize)
 }
 
-func (d *Store) Close() {
+func (d *Store) Close() error {
 	for _, file := range d.files {
-		file.Close()
+		if err := file.Close(); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (d *Store) Put(value []byte) ([]byte, error) {
