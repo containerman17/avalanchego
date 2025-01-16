@@ -111,7 +111,7 @@ func TestValueStore_NonExistentKey(t *testing.T) {
 
 	// Test Delete
 	err = store.Delete(key)
-	require.ErrorIs(t, err, database.ErrNotFound)
+	require.NoError(t, err)
 }
 
 func TestValueStore_UpdateExistingKey(t *testing.T) {

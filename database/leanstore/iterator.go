@@ -4,37 +4,29 @@
 package leanstore
 
 import (
-	"errors"
-	"sync"
-
-	"github.com/cockroachdb/pebble"
-
 	"github.com/ava-labs/avalanchego/database"
 )
 
 var (
 	_ database.Iterator = (*iter)(nil)
-
-	errCouldNotGetValue = errors.New("could not get iterator value")
 )
 
 type iter struct {
-	// [lock] ensures that only one goroutine can access [iter] at a time.
-	// Note that [Database.Close] calls [iter.Release] so we need [lock] to ensure
-	// that the user and [Database.Close] don't execute [iter.Release] concurrently.
-	// Invariant: [Database.lock] is never grabbed while holding [lock].
-	lock sync.Mutex
+	db       *Database
+	start    []byte
+	prefix   []byte
+	nextKeys [][]byte
+	nextVals [][]byte
+}
 
-	db   *Database
-	iter *pebble.Iterator
-
-	initialized bool
-	closed      bool
-	err         error
-
-	hasNext bool
-	nextKey []byte
-	nextVal []byte
+func NewIterator(db *Database, start []byte, prefix []byte) *iter {
+	return &iter{
+		db:       db,
+		start:    start,
+		prefix:   prefix,
+		nextKeys: make([][]byte, 1),
+		nextVals: make([][]byte, 1),
+	}
 }
 
 // Error implements database.Iterator.

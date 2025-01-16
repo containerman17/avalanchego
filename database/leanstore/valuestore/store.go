@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"github.com/ava-labs/avalanchego/database"
@@ -41,16 +42,28 @@ func NewValueStore(dir string, blockSize int) (*ValueStore, error) {
 		return nil, fmt.Errorf("failed to create index db: %w", err)
 	}
 
+	decoder := NewBlockDecoder()
+
+	if blockStore.NumBlocks() == 0 {
+		emptyBlock, _, err := EncodeBlock(nil, [][]byte{}, [][]byte{}, blockSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode empty block: %w", err)
+		}
+		blockId, err := blockStore.Insert(emptyBlock)
+		if err != nil {
+			return nil, fmt.Errorf("failed to insert empty block: %w", err)
+		}
+		if blockId != 0 {
+			panic("expected block ID 0, got " + strconv.Itoa(int(blockId)))
+		}
+	}
+
 	store := &ValueStore{
 		index:      index,
-		codec:      NewBlockDecoder(),
+		codec:      decoder,
 		mutexes:    [numLockStripes]sync.RWMutex{},
 		blockStore: blockStore,
 		blockSize:  blockSize,
-	}
-
-	if err := store.initialize(); err != nil {
-		return nil, fmt.Errorf("failed to initialize value store: %w", err)
 	}
 
 	return store, nil
@@ -70,36 +83,6 @@ func (v *ValueStore) Close() error {
 	return nil
 }
 
-// manualy puts 0x00 value
-func (v *ValueStore) initialize() error {
-	_, err := v.index.GetFloorValue([]byte{0x00})
-	if err == nil {
-		return nil
-	}
-
-	if err != nil && err.Error() == "no floor value found" {
-		// Create a minimal valid block with header, empty prefix, and one empty entry
-		block := []byte{
-			0x00, 0x07, // Block length (7 bytes)
-			0x00,       // Prefix length (0)
-			0x00,       // Key length (0)
-			0x00, 0x00, // Value length (0)
-		}
-
-		newBlockID, err := v.blockStore.Insert(block)
-		if err != nil {
-			return fmt.Errorf("failed to insert empty block: %w", err)
-		}
-
-		err = v.index.Put([][]byte{{0x00}}, []uint32{newBlockID})
-		if err != nil {
-			return fmt.Errorf("failed to put floor value: %w", err)
-		}
-	}
-
-	return nil
-}
-
 func (v *ValueStore) getMutex(blockID uint32) *sync.RWMutex {
 	return &v.mutexes[blockID%numLockStripes]
 }
@@ -109,7 +92,7 @@ func (v *ValueStore) Delete(key []byte) error {
 	blockID, err := v.index.GetFloorValue(key)
 	if err != nil {
 		if err.Error() == "no floor value found" {
-			return database.ErrNotFound
+			return nil
 		}
 		return fmt.Errorf("failed to get floor value: %w", err)
 	}
@@ -128,7 +111,7 @@ func (v *ValueStore) Delete(key []byte) error {
 		return fmt.Errorf("failed to get value: %w", err)
 	}
 	if !found {
-		return database.ErrNotFound
+		return nil
 	}
 
 	decodedKeys, decodedValues, err := v.codec.Decode(block)
@@ -151,7 +134,7 @@ func (v *ValueStore) Delete(key []byte) error {
 	}
 
 	if !found {
-		return database.ErrNotFound
+		return nil
 	}
 
 	updatedBlock, newBlocks, err := EncodeBlock(nil, newKeys, newValues, v.blockSize)

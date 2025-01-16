@@ -39,6 +39,10 @@ func NewBlockDecoder() *BlockDecoder {
 
 // Decode decodes a block using internal buffers
 func (d *BlockDecoder) Decode(block []byte) ([][]byte, [][]byte, error) {
+	if len(block) == 0 {
+		return [][]byte{}, [][]byte{}, nil
+	}
+
 	if len(block) < 2 {
 		return nil, nil, errors.New("block too short")
 	}
@@ -53,7 +57,7 @@ func (d *BlockDecoder) Decode(block []byte) ([][]byte, [][]byte, error) {
 	prefixLen := int(block[pos])
 	pos++
 	if pos+prefixLen >= blockUsedLen {
-		return nil, nil, errors.New("invalid prefix length")
+		return nil, nil, errors.New("invalid prefix length in Decode")
 	}
 	prefix := block[pos : pos+prefixLen]
 	pos += prefixLen
@@ -378,7 +382,14 @@ func GetValue(block []byte, key []byte) (bool, []byte, error) {
 		return false, nil, errors.New("block too short")
 	}
 
+	// Read block length from header
 	blockUsedLen := int(block[0])<<8 | int(block[1])
+
+	// Special case for empty block (just header)
+	if blockUsedLen == 2 {
+		return false, nil, nil
+	}
+
 	if blockUsedLen > len(block) {
 		return false, nil, errors.New("invalid block length")
 	}
@@ -388,7 +399,8 @@ func GetValue(block []byte, key []byte) (bool, []byte, error) {
 	prefixLen := int(block[pos])
 	pos++
 	if pos+prefixLen >= blockUsedLen {
-		return false, nil, errors.New("invalid prefix length")
+		fmt.Printf("invalid prefix length in GetValue, full block: %x\n", block)
+		return false, nil, errors.New("invalid prefix length in GetValue")
 	}
 	prefix := block[pos : pos+prefixLen]
 	pos += prefixLen

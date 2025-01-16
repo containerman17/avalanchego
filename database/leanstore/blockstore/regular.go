@@ -47,14 +47,16 @@ func CreateRegularBlockStore(path string, blockSizeBytes int) (*RegularBlockStor
 	fileSize := fileInfo.Size()
 	nextBlockID := uint32(fileSize / int64(blockSizeBytes))
 
-	return &RegularBlockStore{
+	store := &RegularBlockStore{
 		file:             file,
 		blockSize:        blockSizeBytes,
 		path:             path,
 		nextBlockID:      nextBlockID,
 		mutexes:          [numStripes]sync.RWMutex{},
 		nextBlockIDMutex: sync.RWMutex{},
-	}, nil
+	}
+
+	return store, nil
 }
 
 // Get retrieves a block by its ID

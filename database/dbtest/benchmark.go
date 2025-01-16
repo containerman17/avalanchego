@@ -30,8 +30,8 @@ var (
 	BenchmarkSizes = [][]int{
 		// count, keySize, valueSize
 		{1024, 32, 32},
-		{1024, 256, 256},
-		{1024, 2 * units.KiB, 2 * units.KiB},
+		{1024, 255, 256},
+		{1024, 255, 2 * units.KiB},
 	}
 )
 

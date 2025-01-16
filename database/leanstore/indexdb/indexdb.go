@@ -40,7 +40,6 @@ func (i *IndexDB) Delete(key []byte) error {
 		return b.Delete(key)
 	})
 }
-
 func (i *IndexDB) GetFloorValue(key []byte) (uint32, error) {
 	var value uint32
 	err := i.impl.View(func(tx *bbolt.Tx) error {
@@ -62,7 +61,8 @@ func (i *IndexDB) GetFloorValue(key []byte) (uint32, error) {
 		}
 
 		if k == nil {
-			return errors.New("no floor value found")
+			value = 0
+			return nil
 		}
 
 		value = binary.BigEndian.Uint32(v)

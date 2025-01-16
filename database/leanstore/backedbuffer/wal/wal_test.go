@@ -13,8 +13,8 @@ func TestWALWriteReplay(t *testing.T) {
 	defer os.Remove(tmpfile)
 
 	// Create new WAL with 4-byte keys and values
-	wal := New(tmpfile)
-	if wal == nil {
+	wal, err := New(tmpfile)
+	if err != nil {
 		t.Fatal("Failed to create WAL")
 	}
 
@@ -28,7 +28,7 @@ func TestWALWriteReplay(t *testing.T) {
 		[]byte("val2"),
 	}
 
-	err := wal.Write(keys1, vals1)
+	err = wal.Write(keys1, vals1)
 	if err != nil {
 		t.Fatalf("First write failed: %v", err)
 	}
@@ -38,8 +38,8 @@ func TestWALWriteReplay(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	wal = New(tmpfile)
-	if wal == nil {
+	wal, err = New(tmpfile)
+	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
 
@@ -151,8 +151,8 @@ func TestWALVariableLength(t *testing.T) {
 	tmpfile := "test_variable.wal"
 	defer os.Remove(tmpfile)
 
-	wal := New(tmpfile)
-	if wal == nil {
+	wal, err := New(tmpfile)
+	if err != nil {
 		t.Fatal("Failed to create WAL")
 	}
 
@@ -167,7 +167,7 @@ func TestWALVariableLength(t *testing.T) {
 		[]byte("longvalue3"),
 	}
 
-	err := wal.Write(keys, values)
+	err = wal.Write(keys, values)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -197,8 +197,8 @@ func TestWALReplayBatch(t *testing.T) {
 	tmpfile := "test_batch.wal"
 	defer os.Remove(tmpfile)
 
-	wal := New(tmpfile)
-	if wal == nil {
+	wal, err := New(tmpfile)
+	if err != nil {
 		t.Fatal("Failed to create WAL")
 	}
 
@@ -212,7 +212,7 @@ func TestWALReplayBatch(t *testing.T) {
 	}
 
 	// Write test data
-	err := wal.Write(keys, values)
+	err = wal.Write(keys, values)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}

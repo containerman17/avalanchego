@@ -6,15 +6,12 @@ package leanstore
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"path"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 
 	"github.com/ava-labs/avalanchego/database"
-	"github.com/ava-labs/avalanchego/database/leanstore/backedbuffer"
 	"github.com/ava-labs/avalanchego/database/leanstore/overflow"
 	"github.com/ava-labs/avalanchego/database/leanstore/valuemeta"
 	"github.com/ava-labs/avalanchego/database/leanstore/valuestore"
@@ -28,14 +25,10 @@ const (
 	// pebbleByteOverHead is the number of bytes of constant overhead that
 	// should be added to a batch size per operation.
 	pebbleByteOverHead = 8
-
-	defaultCacheSize = 512 * units.MiB
 )
 
 var (
 	_ database.Database = (*Database)(nil)
-
-	errInvalidOperation = errors.New("invalid operation")
 
 	DefaultConfig = Config{
 		BlockSize:             16 * units.KiB,
@@ -45,7 +38,6 @@ var (
 
 type Database struct {
 	closed        bool
-	backedBuffer1 *backedbuffer.BackedBuffer
 	config        Config
 	overflowStore *overflow.Store
 	valueStore    *valuestore.ValueStore
@@ -74,11 +66,6 @@ func New(file string, configBytes []byte, log logging.Logger, _ prometheus.Regis
 		return nil, err
 	}
 
-	backedBuffer1, err := backedbuffer.New(path.Join(file, "backedbuffer1"))
-	if err != nil {
-		return nil, err
-	}
-
 	valStore, err := valuestore.NewValueStore(path.Join(file, "valuestore"), cfg.BlockSize)
 	if err != nil {
 		return nil, err
@@ -87,7 +74,6 @@ func New(file string, configBytes []byte, log logging.Logger, _ prometheus.Regis
 	return &Database{
 		config:        cfg,
 		overflowStore: overflowStore,
-		backedBuffer1: backedBuffer1,
 		valueStore:    valStore,
 	}, nil
 }
@@ -99,12 +85,7 @@ func (db *Database) Close() error {
 
 	db.closed = true
 
-	err := db.backedBuffer1.Close()
-	if err != nil {
-		return err
-	}
-
-	err = db.overflowStore.Close()
+	err := db.overflowStore.Close()
 	if err != nil {
 		return err
 	}
@@ -124,32 +105,7 @@ func (db *Database) Has(key []byte) (bool, error) {
 		return false, database.ErrClosed
 	}
 
-	// Check in backedBuffer1
-	has, err := db.backedBuffer1.Has(key)
-	if err != nil {
-		return false, err
-	}
-
-	if has {
-		// If the key exists in backedBuffer1, we need to check if it's a tombstone
-		value, err := db.backedBuffer1.Get(key)
-		if err != nil {
-			return false, err
-		}
-		if valuemeta.IsTombstone(value) {
-			fmt.Printf("Has key=%x tombstone\n", key)
-			return false, nil
-		}
-		fmt.Printf("Has key=%x\n", key)
-		return true, nil
-	}
-
-	has, err = db.valueStore.Has(key)
-	if err != nil {
-		return false, err
-	}
-	fmt.Printf("Has key=%x from valueStore: %t\n", key, has)
-	return has, nil
+	return db.valueStore.Has(key)
 }
 
 func (db *Database) Get(key []byte) ([]byte, error) {
@@ -157,32 +113,17 @@ func (db *Database) Get(key []byte) ([]byte, error) {
 		return nil, database.ErrClosed
 	}
 
-	var value []byte
-	var err error
-
-	//check in the temp store1
-	value, err = db.backedBuffer1.Get(key)
-	if err != nil {
-		return nil, err
-	}
-
-	if value != nil {
-		return db.untangleRemote(value)
-	}
-
-	//TODO: check in the temp store2 when implemented
-
-	//get from the main store
-	value, err = db.valueStore.Get(key)
-	if err != nil {
-		return nil, err
-	}
+	// fmt.Printf("Get key: %x\n", key)
+	value, err := db.valueStore.Get(key)
+	// fmt.Printf("Get raw value: %x, err: %v\n", value, err)
 
 	if value == nil {
 		return nil, database.ErrNotFound
 	}
 
-	return db.untangleRemote(value)
+	result, err := db.untangleRemote(value)
+	// fmt.Printf("Get untangled value: %x, err: %v\n", result, err)
+	return result, err
 }
 
 func (db *Database) untangleRemote(value []byte) ([]byte, error) {
@@ -208,6 +149,7 @@ func (db *Database) Put(key []byte, value []byte) error {
 		return database.ErrClosed
 	}
 
+	// fmt.Printf("Put key: %x, value: %x\n", key, value)
 	var metadataByte byte
 	if len(value) > db.config.OverflowThresholdSize {
 		metadataByte = valuemeta.Remote
@@ -218,10 +160,9 @@ func (db *Database) Put(key []byte, value []byte) error {
 	valueWithMeta := make([]byte, len(value)+1)
 	valueWithMeta[0] = metadataByte
 	copy(valueWithMeta[1:], value)
+	// fmt.Printf("Put valueWithMeta: %x\n", valueWithMeta)
 
-	fmt.Printf("Put key=%x value=%x\n", key, valueWithMeta)
-
-	return db.backedBuffer1.Put([][]byte{key}, [][]byte{valueWithMeta})
+	return db.valueStore.Put(key, valueWithMeta)
 }
 
 func (db *Database) Delete(key []byte) error {
@@ -229,9 +170,8 @@ func (db *Database) Delete(key []byte) error {
 		return database.ErrClosed
 	}
 
-	fmt.Printf("Delete key=%x\n", key)
-
-	return db.backedBuffer1.Put([][]byte{key}, [][]byte{{valuemeta.Tombstone}})
+	// fmt.Printf("Delete key: %x\n", key)
+	return db.valueStore.Delete(key)
 }
 
 func (db *Database) Compact(start []byte, end []byte) error {
@@ -251,5 +191,5 @@ func (db *Database) NewIteratorWithPrefix(prefix []byte) database.Iterator {
 }
 
 func (db *Database) NewIteratorWithStartAndPrefix(start, prefix []byte) database.Iterator {
-	panic("not implemented")
+	return NewIterator(db, start, prefix)
 }

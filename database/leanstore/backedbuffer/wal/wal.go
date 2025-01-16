@@ -29,10 +29,10 @@ type WAL struct {
 	flushPending bool
 }
 
-func New(filename string) *WAL {
+func New(filename string) (*WAL, error) {
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	w := &WAL{
@@ -46,7 +46,7 @@ func New(filename string) *WAL {
 	// Start background flush goroutine
 	go w.periodicFlush()
 
-	return w
+	return w, nil
 }
 
 func (a *WAL) periodicFlush() {

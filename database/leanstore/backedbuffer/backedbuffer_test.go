@@ -1,14 +1,18 @@
 package backedbuffer
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestValueRewrites(t *testing.T) {
+	tmpDir := t.TempDir()
+	defer os.RemoveAll(tmpDir)
+
 	// Create a new BackedBuffer instance
-	buffer, err := New("test_wal_path")
+	buffer, err := New(tmpDir + "/wal")
 	require.NoError(t, err)
 	defer buffer.Close()
 

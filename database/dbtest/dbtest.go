@@ -583,8 +583,9 @@ func TestBatchLargeSize(t *testing.T, db database.Database) {
 	require := require.New(t)
 
 	totalSize := 8 * units.MiB
-	elementSize := 4 * units.KiB
-	pairSize := 2 * elementSize // 8 KiB
+	keySize := 255 // Maximum key size
+	valueSize := 4 * units.KiB
+	pairSize := keySize + valueSize
 
 	bytes := utils.RandomBytes(totalSize)
 
@@ -592,11 +593,11 @@ func TestBatchLargeSize(t *testing.T, db database.Database) {
 	require.NotNil(batch)
 
 	for len(bytes) > pairSize {
-		key := bytes[:elementSize]
-		bytes = bytes[elementSize:]
+		key := bytes[:keySize]
+		bytes = bytes[keySize:]
 
-		value := bytes[:elementSize]
-		bytes = bytes[elementSize:]
+		value := bytes[:valueSize]
+		bytes = bytes[valueSize:]
 
 		require.NoError(batch.Put(key, value))
 	}

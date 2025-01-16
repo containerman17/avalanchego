@@ -266,6 +266,28 @@ func TestManyKeys(t *testing.T) {
 	require.Equal(t, []byte{byte(keyCount - 1), 0, 0, 0}, val)
 }
 
+func TestEmptyBlock(t *testing.T) {
+	emptyBlock, _, err := EncodeBlock(nil, [][]byte{}, [][]byte{}, 40000)
+	require.NoError(t, err)
+
+	found, val, err := GetValue(emptyBlock, []byte("apple"))
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Nil(t, val)
+}
+
+func TestEmptyBlockPadded(t *testing.T) {
+	emptyBlock, _, err := EncodeBlock(nil, [][]byte{}, [][]byte{}, 128)
+	require.NoError(t, err)
+
+	emptyBlock = append(emptyBlock, make([]byte, 128-len(emptyBlock))...)
+
+	found, val, err := GetValue(emptyBlock, []byte("apple"))
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Nil(t, val)
+}
+
 func BenchmarkBlockDecoderParallel(b *testing.B) {
 	// Create 1000 different blocks
 	numBlocks := 1000

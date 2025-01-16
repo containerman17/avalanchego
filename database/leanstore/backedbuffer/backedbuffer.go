@@ -13,10 +13,13 @@ type BackedBuffer struct {
 }
 
 func New(walPath string) (*BackedBuffer, error) {
-	walStore := wal.New(walPath)
+	walStore, err := wal.New(walPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create WAL: %w", err)
+	}
 	memStore := rbtree.NewRBTreeStore()
 
-	err := walStore.Replay(memStore)
+	err = walStore.Replay(memStore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read wal: %w", err)
 	}
