@@ -119,6 +119,7 @@ func (b *batch) Write() error {
 		}
 	}
 
+	b.written = true // Set written flag after successful write
 	return nil
 }
 

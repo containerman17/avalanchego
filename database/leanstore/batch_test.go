@@ -32,7 +32,7 @@ func TestBatch(t *testing.T) {
 
 	require.NoError(batch.Write())
 
-	require.True(batch.written)
+	require.True(batch.written, "batch should be written")
 
 	got, err := db.Get(key1)
 	require.NoError(err)

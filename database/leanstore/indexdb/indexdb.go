@@ -34,12 +34,6 @@ func NewIndexDB(path string) (*IndexDB, error) {
 	return &IndexDB{impl: impl}, nil
 }
 
-func (i *IndexDB) Delete(key []byte) error {
-	return i.impl.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(bucketName))
-		return b.Delete(key)
-	})
-}
 func (i *IndexDB) GetFloorValue(key []byte) (uint32, error) {
 	var value uint32
 	err := i.impl.View(func(tx *bbolt.Tx) error {
@@ -69,6 +63,47 @@ func (i *IndexDB) GetFloorValue(key []byte) (uint32, error) {
 		return nil
 	})
 	return value, err
+}
+
+// FIXME: might not need to return the key
+func (i *IndexDB) GetNextKeyValue(key []byte) ([]byte, uint32, error) {
+	var nextKey []byte
+	var nextValue uint32
+
+	err := i.impl.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketName))
+		c := b.Cursor()
+
+		// Seek to the given key
+		k, v := c.Seek(key)
+
+		// If we found an exact match, move to the next entry
+		if k != nil && bytes.Equal(k, key) {
+			k, v = c.Next()
+		}
+
+		// If there is no next key, return nil
+		if k == nil {
+			return nil
+		}
+
+		// Copy the key and value
+		nextKey = make([]byte, len(k))
+		copy(nextKey, k)
+		nextValue = binary.BigEndian.Uint32(v)
+		return nil
+	})
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// If no next key was found, return nil
+	if nextKey == nil {
+		return nil, 0, nil
+	}
+
+	return nextKey, nextValue, nil
 }
 
 func (i *IndexDB) Put(keys [][]byte, values []uint32) error {
