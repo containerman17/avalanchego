@@ -175,3 +175,12 @@ func TestValueStore_BlockSplitting(t *testing.T) {
 		require.Equal(t, []byte(entry.value), value)
 	}
 }
+
+func TestValueStore_Empty(t *testing.T) {
+	store, cleanup := setupValueStore(t)
+	defer cleanup()
+
+	value, err := store.Get([]byte("key1"))
+	require.ErrorIs(t, err, database.ErrNotFound)
+	require.Nil(t, value)
+}

@@ -52,6 +52,11 @@ func (d *BlockDecoder) Decode(block []byte) ([][]byte, [][]byte, error) {
 		return nil, nil, errors.New("invalid block length")
 	}
 
+	if blockUsedLen == 2 {
+		//this is normal empty block
+		return [][]byte{}, [][]byte{}, nil
+	}
+
 	// Read block prefix
 	pos := 2
 	prefixLen := int(block[pos])

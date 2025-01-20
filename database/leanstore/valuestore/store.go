@@ -248,4 +248,26 @@ func (v *ValueStore) Put(key []byte, value []byte) error {
 	return nil
 }
 
+// NewIterator creates an iterator over the key-value pairs in the store.
+// The iterator will only return key-value pairs where the key is in the range [start, end).
+// If start is nil, iteration will start from the beginning.
+// If end is nil, iteration will continue until the end.
+func (v *ValueStore) NewIterator(start []byte, end []byte) database.Iterator {
+	if start == nil {
+		start = []byte{0x00}
+	}
+
+	if end == nil {
+		end = bytes.Repeat([]byte{0xff}, 255)
+	}
+
+	return &Iterator{
+		valuestore:     v,
+		start:          start,
+		end:            end,
+		currentIndex:   -1, // Haven't loaded first block yet
+		currentBlockID: 0,
+	}
+}
+
 var _ database.KeyValueReaderWriterDeleter = (*ValueStore)(nil)
