@@ -4,7 +4,6 @@
 package leanstore
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,12 +32,6 @@ func TestBasic(t *testing.T) {
 
 func TestInterface(t *testing.T) {
 	for name, test := range dbtest.Tests {
-		if strings.Contains(name, "Iterator") || strings.Contains(name, "Compact") || strings.Contains(name, "Prefix") || strings.Contains(name, "Clear") { //TODO: remove
-			continue
-		}
-		// if !strings.Contains(name, "ModifyValueAfterBatchPut") {
-		// 	continue
-		// }
 		t.Run(name, func(t *testing.T) {
 			db := newDB(t)
 			test(t, db)

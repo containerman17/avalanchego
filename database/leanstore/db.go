@@ -175,6 +175,9 @@ func (db *Database) Delete(key []byte) error {
 }
 
 func (db *Database) Compact(start []byte, end []byte) error {
+	if db.closed {
+		return database.ErrClosed
+	}
 	return nil //no need for compaction
 }
 
@@ -189,6 +192,7 @@ func (db *Database) NewIteratorWithStart(start []byte) database.Iterator {
 func (db *Database) NewIteratorWithPrefix(prefix []byte) database.Iterator {
 	return db.NewIteratorWithStartAndPrefix(nil, prefix)
 }
+
 func (db *Database) NewIteratorWithStartAndPrefix(start, prefix []byte) database.Iterator {
 	// If start is nil, use minimum possible key
 	if start == nil {
@@ -209,5 +213,57 @@ func (db *Database) NewIteratorWithStartAndPrefix(start, prefix []byte) database
 		}
 	}
 
-	return db.valueStore.NewIterator(start, end)
+	valuestoreIterator := db.valueStore.NewIterator(start, end)
+	return &IteratorWrapper{valuestoreIterator: valuestoreIterator, db: db}
+}
+
+var (
+	_ database.Iterator = (*IteratorWrapper)(nil)
+)
+
+type IteratorWrapper struct {
+	valuestoreIterator database.Iterator
+	db                 *Database
+	lastError          error
+}
+
+// Error implements database.Iterator.
+func (i *IteratorWrapper) Error() error {
+	if i.lastError != nil {
+		return i.lastError
+	}
+	return i.valuestoreIterator.Error()
+}
+
+// Key implements database.Iterator.
+func (i *IteratorWrapper) Key() []byte {
+	return i.valuestoreIterator.Key()
+}
+
+// Next implements database.Iterator.
+func (i *IteratorWrapper) Next() bool {
+	if i.db.closed {
+		i.lastError = database.ErrClosed
+		return false
+	}
+	return i.valuestoreIterator.Next()
+}
+
+// Release implements database.Iterator.
+func (i *IteratorWrapper) Release() {
+	i.valuestoreIterator.Release()
+}
+
+// Value implements database.Iterator.
+func (i *IteratorWrapper) Value() []byte {
+	value := i.valuestoreIterator.Value()
+	if value == nil {
+		return nil
+	}
+	// Decode the remote value
+	decodedValue, err := i.db.untangleRemote(value)
+	if err != nil {
+		return nil
+	}
+	return decodedValue
 }
