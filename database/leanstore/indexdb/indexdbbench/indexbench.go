@@ -76,7 +76,7 @@ func main() {
 	for i := 0; i < readItems; i++ {
 		// Pick a random key from our dataset
 		idx := i % numItems
-		val, err := db.GetFloorValue(keys[idx])
+		_, val, err := db.GetFloorKeyValue(keys[idx])
 		if err != nil {
 			errors++
 			continue
@@ -95,7 +95,7 @@ func main() {
 	errors = 0
 	for i := 0; i < readItems; i++ {
 		randomKey := generateRandomKey()
-		_, err := db.GetFloorValue(randomKey)
+		_, _, err := db.GetFloorKeyValue(randomKey)
 		if err != nil {
 			errors++
 		}

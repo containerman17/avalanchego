@@ -23,6 +23,7 @@ type ValueStore struct {
 	codec      *BlockDecoder
 	blockStore *blockstore.RegularBlockStore
 	blockSize  int
+	closed     bool
 }
 
 func NewValueStore(dir string, blockSize int) (*ValueStore, error) {
@@ -70,6 +71,8 @@ func NewValueStore(dir string, blockSize int) (*ValueStore, error) {
 }
 
 func (v *ValueStore) Close() error {
+	v.closed = true
+
 	err := v.index.Close()
 	if err != nil {
 		return fmt.Errorf("failed to close index db: %w", err)
@@ -89,7 +92,7 @@ func (v *ValueStore) getMutex(blockID uint32) *sync.RWMutex {
 
 // Delete implements database.KeyValueReaderWriterDeleter.
 func (v *ValueStore) Delete(key []byte) error {
-	blockID, err := v.index.GetFloorValue(key)
+	_, blockID, err := v.index.GetFloorKeyValue(key)
 	if err != nil {
 		if err.Error() == "no floor value found" {
 			return nil
@@ -154,7 +157,7 @@ func (v *ValueStore) Delete(key []byte) error {
 }
 
 func (v *ValueStore) Get(key []byte) ([]byte, error) {
-	blockID, err := v.index.GetFloorValue(key)
+	_, blockID, err := v.index.GetFloorKeyValue(key)
 	if err != nil {
 		if err.Error() == "no floor value found" {
 			return nil, database.ErrNotFound
@@ -183,7 +186,7 @@ func (v *ValueStore) Get(key []byte) ([]byte, error) {
 }
 
 func (v *ValueStore) Has(key []byte) (bool, error) {
-	blockID, err := v.index.GetFloorValue(key)
+	_, blockID, err := v.index.GetFloorKeyValue(key)
 	if err != nil {
 		if err.Error() == "no floor value found" {
 			return false, nil
@@ -209,7 +212,7 @@ func (v *ValueStore) Has(key []byte) (bool, error) {
 }
 
 func (v *ValueStore) Put(key []byte, value []byte) error {
-	blockID, err := v.index.GetFloorValue(key)
+	_, blockID, err := v.index.GetFloorKeyValue(key)
 	if err != nil {
 		return fmt.Errorf("failed to get floor value: %w", err)
 	}
@@ -262,11 +265,10 @@ func (v *ValueStore) NewIterator(start []byte, end []byte) database.Iterator {
 	}
 
 	return &Iterator{
-		valuestore:     v,
-		start:          start,
-		end:            end,
-		currentIndex:   -1, // Haven't loaded first block yet
-		currentBlockID: 0,
+		valuestore: v,
+		start:      start,
+		end:        end,
+		index:      -1, // Haven't loaded first block yet
 	}
 }
 

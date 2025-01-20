@@ -34,35 +34,44 @@ func NewIndexDB(path string) (*IndexDB, error) {
 	return &IndexDB{impl: impl}, nil
 }
 
-func (i *IndexDB) GetFloorValue(key []byte) (uint32, error) {
+func (i *IndexDB) GetFloorKeyValue(targetKey []byte) ([]byte, uint32, error) {
+	var floorKey []byte
 	var value uint32
 	err := i.impl.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		c := b.Cursor()
 
 		// Try to find the key or the next greater one
-		k, v := c.Seek(key)
+		k, v := c.Seek(targetKey)
 
 		// If we found an exact match, return it
-		if k != nil && bytes.Equal(k, key) {
+		if k != nil && bytes.Equal(k, targetKey) {
+			floorKey = make([]byte, len(k))
+			copy(floorKey, k)
 			value = binary.BigEndian.Uint32(v)
 			return nil
 		}
 
 		// No exact match, get the previous key
-		if k == nil || bytes.Compare(k, key) > 0 {
+		if k == nil || bytes.Compare(k, targetKey) > 0 {
 			k, v = c.Prev()
 		}
 
 		if k == nil {
+			// No previous key found, return 0
+			floorKey = make([]byte, len(targetKey))
+			copy(floorKey, targetKey)
 			value = 0
 			return nil
 		}
 
+		// Copy the floor key and value
+		floorKey = make([]byte, len(targetKey))
+		copy(floorKey, targetKey)
 		value = binary.BigEndian.Uint32(v)
 		return nil
 	})
-	return value, err
+	return floorKey, value, err
 }
 
 // FIXME: might not need to return the key

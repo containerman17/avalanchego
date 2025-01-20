@@ -81,7 +81,7 @@ func TestIndexDB_GetFloorValue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := db.GetFloorValue(tt.searchKey)
+			gotKey, gotValue, err := db.GetFloorKeyValue(tt.searchKey)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("GetFloorValue() error = nil, wantErr %v", tt.wantErr)
@@ -96,8 +96,11 @@ func TestIndexDB_GetFloorValue(t *testing.T) {
 				t.Errorf("GetFloorValue() unexpected error = %v", err)
 				return
 			}
-			if got != tt.wantValue {
-				t.Errorf("GetFloorValue() = %v, want %v", got, tt.wantValue)
+			if !bytes.Equal(gotKey, tt.searchKey) {
+				t.Errorf("GetFloorValue() = %v, want %v", gotKey, tt.searchKey)
+			}
+			if gotValue != tt.wantValue {
+				t.Errorf("GetFloorValue() = %v, want %v", gotValue, tt.wantValue)
 			}
 		})
 	}

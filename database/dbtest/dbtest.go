@@ -720,8 +720,8 @@ func TestIteratorPrefix(t *testing.T, db database.Database) {
 	defer iterator.Release()
 
 	require.True(iterator.Next())
-	require.Equal(key1, iterator.Key())
-	require.Equal(value1, iterator.Value())
+	require.Equal(string(key1), string(iterator.Key()))
+	require.Equal(string(value1), string(iterator.Value()))
 
 	require.False(iterator.Next())
 	require.Nil(iterator.Key())

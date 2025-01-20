@@ -18,15 +18,18 @@ type Iterator struct {
 	start      []byte
 	end        []byte
 
-	// Current block tracking
-	currentBlockID uint32
-	currentKeys    [][]byte
-	currentValues  [][]byte
-	currentIndex   int
+	// FIXME: Implement database-level snapshots to ensure iterator consistency
+	// Currently, iterators may see modifications made after their creation
+
+	// In-memory storage of all keys/values
+	keys   [][]byte
+	values [][]byte
+	index  int
 
 	// Error tracking
 	lastError error
 	released  bool
+	closed    bool
 }
 
 // Error implements database.Iterator.
@@ -34,6 +37,9 @@ func (i *Iterator) Error() error {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 
+	if i.closed {
+		return database.ErrClosed
+	}
 	return i.lastError
 }
 
@@ -42,11 +48,11 @@ func (i *Iterator) Key() []byte {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 
-	if i.released || i.currentIndex < 0 || i.currentIndex >= len(i.currentKeys) {
+	if i.released || i.closed || i.index < 0 || i.index >= len(i.keys) {
 		return nil
 	}
 
-	return i.currentKeys[i.currentIndex]
+	return i.keys[i.index]
 }
 
 // Value implements database.Iterator.
@@ -54,11 +60,11 @@ func (i *Iterator) Value() []byte {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 
-	if i.released || i.currentIndex < 0 || i.currentIndex >= len(i.currentValues) {
+	if i.released || i.closed || i.index < 0 || i.index >= len(i.values) {
 		return nil
 	}
 
-	return i.currentValues[i.currentIndex]
+	return i.values[i.index]
 }
 
 // Next implements database.Iterator.
@@ -70,19 +76,21 @@ func (i *Iterator) Next() bool {
 		return false
 	}
 
+	if i.closed || i.valuestore.closed {
+		i.keys = make([][]byte, 0)
+		i.values = make([][]byte, 0)
+		i.index = -1
+		return false
+	}
+
 	// First call to Next()
-	if i.currentIndex == -1 {
-		return i.loadNextBlock()
+	if i.index == -1 {
+		return i.loadAllData()
 	}
 
-	// Try moving to next item in current block
-	i.currentIndex++
-	if i.currentIndex < len(i.currentKeys) {
-		return true
-	}
-
-	// Need to load next block
-	return i.loadNextBlock()
+	// Move to next item
+	i.index++
+	return i.index < len(i.keys)
 }
 
 // Release implements database.Iterator.
@@ -90,105 +98,77 @@ func (i *Iterator) Release() {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 
-	i.clearCurrentBlock()
+	i.keys = nil
+	i.values = nil
 	i.released = true
 }
 
-// Helper methods
-func (i *Iterator) loadNextBlock() bool {
-	// Get the next block's starting key and ID
-	var nextKey []byte
-	var nextBlockID uint32
-	var err error
+func (it *Iterator) loadAllData() bool {
+	// First collect all block numbers we need to scan
+	var blockNumbers []uint32
 
-	if i.currentKeys == nil {
-		// First block - use the start key
-		nextBlockID, err = i.valuestore.index.GetFloorValue(i.start)
+	// Get the first block number
+	floorKey, blockNumber, err := it.valuestore.index.GetFloorKeyValue(it.start)
+	if err != nil {
+		it.lastError = err
+		return false
+	}
+
+	// Keep getting next block numbers until we exceed end range
+	blockNumbers = append(blockNumbers, blockNumber)
+
+	for {
+		nextBlockFirstKey, nextBlockNumber, err := it.valuestore.index.GetNextKeyValue(floorKey)
 		if err != nil {
-			if err.Error() == "no floor value found" {
-				// For empty database, use block 0 which was created during initialization
-				nextBlockID = 0
-			} else {
-				i.lastError = err
-				return false
-			}
-		}
-	} else {
-		// Only try to get next block if we have keys in the current block
-		if len(i.currentKeys) > 0 {
-			nextKey, nextBlockID, err = i.valuestore.index.GetNextKeyValue(i.currentKeys[len(i.currentKeys)-1])
-			if err != nil {
-				i.lastError = err
-				return false
-			}
-			// No more blocks
-			if nextKey == nil {
-				return false
-			}
-			// If we have an end boundary and the next block starts beyond it, we're done
-			if i.end != nil && bytes.Compare(nextKey, i.end) >= 0 {
-				return false
-			}
-		} else {
-			// Current block is empty, no need to continue
+			it.lastError = err
 			return false
 		}
-	}
-
-	// Clear current block data before loading new block
-	i.clearCurrentBlock()
-	i.currentBlockID = nextBlockID
-
-	return i.loadCurrentBlock()
-}
-
-func (i *Iterator) loadCurrentBlock() bool {
-	// Get mutex for the block
-	mutex := i.valuestore.getMutex(i.currentBlockID)
-	mutex.RLock()
-	defer mutex.RUnlock()
-
-	// Load the block
-	block, err := i.valuestore.blockStore.Get(i.currentBlockID)
-	if err != nil {
-		i.lastError = err
-		return false
-	}
-
-	// Decode the block
-	keys, values, err := i.valuestore.codec.Decode(block)
-	if err != nil {
-		i.lastError = err
-		return false
-	}
-
-	// Filter keys based on range
-	i.currentKeys = make([][]byte, 0, len(keys))
-	i.currentValues = make([][]byte, 0, len(values))
-
-	for idx, key := range keys {
-		// Skip keys before start
-		if i.start != nil && bytes.Compare(key, i.start) < 0 {
-			continue
-		}
-		// Stop if we've exceeded end
-		if i.end != nil && bytes.Compare(key, i.end) >= 0 {
+		if nextBlockFirstKey == nil || bytes.Compare(nextBlockFirstKey, it.end) >= 0 {
 			break
 		}
-		i.currentKeys = append(i.currentKeys, key)
-		i.currentValues = append(i.currentValues, values[idx])
+		blockNumbers = append(blockNumbers, nextBlockNumber)
+		floorKey = nextBlockFirstKey
 	}
 
-	if len(i.currentKeys) == 0 {
-		return i.loadNextBlock()
+	// Now extract all keys/values from the blocks
+	it.keys = make([][]byte, 0)
+	it.values = make([][]byte, 0)
+
+	for _, blockNum := range blockNumbers {
+		blockBytes, err := it.valuestore.blockStore.Get(blockNum)
+		if err != nil {
+			it.lastError = err
+			return false
+		}
+		keys, values, err := it.valuestore.codec.Decode(blockBytes)
+		if err != nil {
+			it.lastError = err
+			return false
+		}
+		// Make copies of keys and values
+		keysCopy := make([][]byte, len(keys))
+		valuesCopy := make([][]byte, len(values))
+		for i := range keys {
+			keysCopy[i] = append([]byte(nil), keys[i]...)
+			valuesCopy[i] = append([]byte(nil), values[i]...)
+		}
+		keys = keysCopy
+		values = valuesCopy
+
+		// Filter keys in range
+		for i, key := range keys {
+			if bytes.Compare(key, it.start) < 0 {
+				continue
+			}
+			if bytes.Compare(key, it.end) >= 0 {
+				continue
+			}
+			it.keys = append(it.keys, key)
+			it.values = append(it.values, values[i])
+		}
 	}
 
-	i.currentIndex = 0
-	return true
-}
+	it.index = 0
 
-func (i *Iterator) clearCurrentBlock() {
-	i.currentKeys = nil
-	i.currentValues = nil
-	i.currentIndex = -1
+	return len(it.keys) > 0
 }

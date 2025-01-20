@@ -174,8 +174,56 @@ func TestIterator_MultipleBlocks(t *testing.T) {
 	// Should iterate through all pairs in order
 	for _, pair := range pairs {
 		require.True(t, iter.Next())
-		require.True(t, bytes.Equal(pair.key, iter.Key()))
-		require.True(t, bytes.Equal(pair.value, iter.Value()))
+		require.Equal(t, string(pair.key), string(iter.Key()))
+		require.Equal(t, string(pair.value), string(iter.Value()))
+	}
+
+	require.False(t, iter.Next())
+	require.NoError(t, iter.Error())
+}
+
+func TestIterator_OverlappingBlocks(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	// Insert keys in non-sequential order to force multiple blocks
+	testData := []struct {
+		key   string
+		value string
+	}{
+		{"key3", "value3"},
+		{"key1", "value1"},
+		{"key4", "value4"},
+		{"key2", "value2"},
+		{"key5", "value5"},
+	}
+
+	// Insert data
+	for _, data := range testData {
+		require.NoError(t, store.Put([]byte(data.key), []byte(data.value)))
+	}
+
+	// Create iterator for full range
+	iter := store.NewIterator(nil, nil)
+	defer iter.Release()
+
+	// Expected order after sorting
+	expected := []struct {
+		key   string
+		value string
+	}{
+		{"key1", "value1"},
+		{"key2", "value2"},
+		{"key3", "value3"},
+		{"key4", "value4"},
+		{"key5", "value5"},
+	}
+
+	// Verify iteration order
+	for _, exp := range expected {
+		require.True(t, iter.Next())
+		require.Equal(t, exp.key, string(iter.Key()))
+		require.Equal(t, exp.value, string(iter.Value()))
 	}
 
 	require.False(t, iter.Next())
