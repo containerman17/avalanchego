@@ -8,9 +8,10 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/ava-labs/avalanchego/database"
 	"github.com/ava-labs/avalanchego/database/leanstore/blockstore"
 	"github.com/ava-labs/avalanchego/database/leanstore/indexdb"
+
+	"github.com/ava-labs/avalanchego/database"
 )
 
 const (
@@ -252,23 +253,95 @@ func (v *ValueStore) Put(key []byte, value []byte) error {
 }
 
 // NewIterator creates an iterator over the key-value pairs in the store.
-// The iterator will only return key-value pairs where the key is in the range [start, end).
-// If start is nil, iteration will start from the beginning.
-// If end is nil, iteration will continue until the end.
-func (v *ValueStore) NewIterator(start []byte, end []byte) database.Iterator {
-	if start == nil {
-		start = []byte{0x00}
+// If prefix is not nil, only returns key-value pairs where key starts with prefix.
+// If start is not nil, only returns key-value pairs where key >= start.
+// If both prefix and start are provided, start must be >= prefix.
+func (v *ValueStore) NewIterator(start, prefix []byte) database.Iterator {
+	if v.closed {
+		return &Iterator{valuestore: v, lastError: database.ErrClosed, closed: true, index: -1}
 	}
 
-	if end == nil {
-		end = bytes.Repeat([]byte{0xff}, 255)
+	// Take a snapshot of the current state by loading all data now
+	var blockNumbers []uint32
+	var keys [][]byte
+	var values [][]byte
+
+	// Get the first block number
+	floorKey, blockNumber, err := v.index.GetFloorKeyValue(start)
+	if err != nil && err.Error() != "no floor value found" {
+		return &Iterator{valuestore: v, lastError: err, index: -1}
+	}
+
+	// Keep getting next block numbers until we exceed end range
+	if err == nil {
+		blockNumbers = append(blockNumbers, blockNumber)
+		for {
+			nextBlockFirstKey, nextBlockNumber, err := v.index.GetNextKeyValue(floorKey)
+			if err != nil {
+				return &Iterator{valuestore: v, lastError: err, index: -1}
+			}
+			if nextBlockFirstKey == nil {
+				break
+			}
+			blockNumbers = append(blockNumbers, nextBlockNumber)
+			floorKey = nextBlockFirstKey
+		}
+	}
+
+	// Now extract all keys/values from the blocks
+	for _, blockNum := range blockNumbers {
+		blockBytes, err := v.blockStore.Get(blockNum)
+		if err != nil {
+			return &Iterator{valuestore: v, lastError: err, index: -1}
+		}
+		blockKeys, blockValues, err := v.codec.Decode(blockBytes)
+		if err != nil {
+			return &Iterator{valuestore: v, lastError: err, index: -1}
+		}
+		// Make copies of keys and values
+		for i := range blockKeys {
+			keys = append(keys, append([]byte(nil), blockKeys[i]...))
+			values = append(values, append([]byte(nil), blockValues[i]...))
+		}
+	}
+
+	// Create end key if prefix is provided
+	var end []byte
+	if prefix != nil {
+		if start == nil || bytes.Compare(start, prefix) < 0 {
+			start = prefix
+		}
+		end = make([]byte, len(prefix))
+		copy(end, prefix)
+		for i := len(end) - 1; i >= 0; i-- {
+			end[i]++
+			if end[i] != 0 {
+				break
+			}
+		}
+	}
+
+	// Filter keys based on range
+	var filteredKeys [][]byte
+	var filteredValues [][]byte
+	for i, key := range keys {
+		if bytes.Compare(key, start) < 0 {
+			continue
+		}
+		if end != nil && bytes.Compare(key, end) >= 0 {
+			continue
+		}
+		filteredKeys = append(filteredKeys, key)
+		filteredValues = append(filteredValues, values[i])
 	}
 
 	return &Iterator{
 		valuestore: v,
 		start:      start,
 		end:        end,
-		index:      -1, // Haven't loaded first block yet
+		keys:       filteredKeys,
+		values:     filteredValues,
+		index:      -1,
 	}
 }
 

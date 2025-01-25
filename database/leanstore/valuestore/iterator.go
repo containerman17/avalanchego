@@ -37,10 +37,13 @@ func (i *Iterator) Error() error {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 
-	if i.closed {
+	if i.lastError != nil {
+		return i.lastError
+	}
+	if i.closed || i.valuestore.closed {
 		return database.ErrClosed
 	}
-	return i.lastError
+	return nil
 }
 
 // Key implements database.Iterator.
@@ -72,20 +75,19 @@ func (i *Iterator) Next() bool {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 
-	if i.released || i.lastError != nil {
-		return false
-	}
-
-	if i.closed || i.valuestore.closed {
-		i.keys = make([][]byte, 0)
-		i.values = make([][]byte, 0)
-		i.index = -1
+	if i.released || i.lastError != nil || i.closed || i.valuestore.closed {
+		if i.valuestore.closed {
+			i.lastError = database.ErrClosed
+		}
+		i.keys = nil
+		i.values = nil
 		return false
 	}
 
 	// First call to Next()
 	if i.index == -1 {
-		return i.loadAllData()
+		i.index = 0
+		return len(i.keys) > 0
 	}
 
 	// Move to next item
@@ -101,6 +103,9 @@ func (i *Iterator) Release() {
 	i.keys = nil
 	i.values = nil
 	i.released = true
+	if i.valuestore.closed {
+		i.lastError = database.ErrClosed
+	}
 }
 
 func (it *Iterator) loadAllData() bool {
@@ -160,7 +165,7 @@ func (it *Iterator) loadAllData() bool {
 			if bytes.Compare(key, it.start) < 0 {
 				continue
 			}
-			if bytes.Compare(key, it.end) >= 0 {
+			if it.end != nil && bytes.Compare(key, it.end) >= 0 {
 				continue
 			}
 			it.keys = append(it.keys, key)

@@ -4,12 +4,14 @@
 package leanstore
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ava-labs/avalanchego/database/dbtest"
+	"github.com/ava-labs/avalanchego/database/leanstore/dbtest"
+
 	"github.com/ava-labs/avalanchego/utils/logging"
 )
 
@@ -58,15 +60,15 @@ func FuzzNewIteratorWithStartAndPrefix(f *testing.F) {
 	_ = db.Close()
 }
 
-// func BenchmarkInterface(b *testing.B) {
-// 	for _, size := range dbtest.BenchmarkSizes {
-// 		keys, values := dbtest.SetupBenchmark(b, size[0], size[1], size[2])
-// 		for name, bench := range dbtest.Benchmarks {
-// 			b.Run(fmt.Sprintf("leanstore_%d_pairs_%d_keys_%d_values_%s", size[0], size[1], size[2], name), func(b *testing.B) {
-// 				db := newDB(b)
-// 				bench(b, db, keys, values)
-// 				_ = db.Close()
-// 			})
-// 		}
-// 	}
-// }
+func BenchmarkInterface(b *testing.B) {
+	for _, size := range dbtest.BenchmarkSizes {
+		keys, values := dbtest.SetupBenchmark(b, size[0], size[1], size[2])
+		for name, bench := range dbtest.Benchmarks {
+			b.Run(fmt.Sprintf("leanstore_%d_pairs_%d_keys_%d_values_%s", size[0], size[1], size[2], name), func(b *testing.B) {
+				db := newDB(b)
+				bench(b, db, keys, values)
+				_ = db.Close()
+			})
+		}
+	}
+}
