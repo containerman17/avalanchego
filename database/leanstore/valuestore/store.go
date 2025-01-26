@@ -20,7 +20,7 @@ const (
 
 type ValueStore struct {
 	index      *indexdb.IndexDB
-	mutexes    [numLockStripes]sync.RWMutex
+	mutex      sync.RWMutex // Single mutex for all operations
 	codec      *BlockDecoder
 	blockStore *blockstore.RegularBlockStore
 	blockSize  int
@@ -63,7 +63,6 @@ func NewValueStore(dir string, blockSize int) (*ValueStore, error) {
 	store := &ValueStore{
 		index:      index,
 		codec:      decoder,
-		mutexes:    [numLockStripes]sync.RWMutex{},
 		blockStore: blockStore,
 		blockSize:  blockSize,
 	}
@@ -72,8 +71,14 @@ func NewValueStore(dir string, blockSize int) (*ValueStore, error) {
 }
 
 func (v *ValueStore) Close() error {
-	v.closed = true
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
 
+	if v.closed {
+		return database.ErrClosed
+	}
+
+	v.closed = true
 	err := v.index.Close()
 	if err != nil {
 		return fmt.Errorf("failed to close index db: %w", err)
@@ -87,12 +92,14 @@ func (v *ValueStore) Close() error {
 	return nil
 }
 
-func (v *ValueStore) getMutex(blockID uint32) *sync.RWMutex {
-	return &v.mutexes[blockID%numLockStripes]
-}
-
-// Delete implements database.KeyValueReaderWriterDeleter.
 func (v *ValueStore) Delete(key []byte) error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	if v.closed {
+		return database.ErrClosed
+	}
+
 	_, blockID, err := v.index.GetFloorKeyValue(key)
 	if err != nil {
 		if err.Error() == "no floor value found" {
@@ -100,10 +107,6 @@ func (v *ValueStore) Delete(key []byte) error {
 		}
 		return fmt.Errorf("failed to get floor value: %w", err)
 	}
-
-	mutex := v.getMutex(blockID)
-	mutex.Lock()
-	defer mutex.Unlock()
 
 	block, err := v.blockStore.Get(blockID)
 	if err != nil {
@@ -158,6 +161,13 @@ func (v *ValueStore) Delete(key []byte) error {
 }
 
 func (v *ValueStore) Get(key []byte) ([]byte, error) {
+	v.mutex.RLock()
+	defer v.mutex.RUnlock()
+
+	if v.closed {
+		return nil, database.ErrClosed
+	}
+
 	_, blockID, err := v.index.GetFloorKeyValue(key)
 	if err != nil {
 		if err.Error() == "no floor value found" {
@@ -165,10 +175,6 @@ func (v *ValueStore) Get(key []byte) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("failed to get floor value: %w", err)
 	}
-
-	mutex := v.getMutex(blockID)
-	mutex.RLock()
-	defer mutex.RUnlock()
 
 	block, err := v.blockStore.Get(blockID)
 	if err != nil {
@@ -187,6 +193,13 @@ func (v *ValueStore) Get(key []byte) ([]byte, error) {
 }
 
 func (v *ValueStore) Has(key []byte) (bool, error) {
+	v.mutex.RLock()
+	defer v.mutex.RUnlock()
+
+	if v.closed {
+		return false, database.ErrClosed
+	}
+
 	_, blockID, err := v.index.GetFloorKeyValue(key)
 	if err != nil {
 		if err.Error() == "no floor value found" {
@@ -194,10 +207,6 @@ func (v *ValueStore) Has(key []byte) (bool, error) {
 		}
 		return false, fmt.Errorf("failed to get floor value: %w", err)
 	}
-
-	mutex := v.getMutex(blockID)
-	mutex.RLock()
-	defer mutex.RUnlock()
 
 	block, err := v.blockStore.Get(blockID)
 	if err != nil {
@@ -213,14 +222,17 @@ func (v *ValueStore) Has(key []byte) (bool, error) {
 }
 
 func (v *ValueStore) Put(key []byte, value []byte) error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	if v.closed {
+		return database.ErrClosed
+	}
+
 	_, blockID, err := v.index.GetFloorKeyValue(key)
 	if err != nil {
 		return fmt.Errorf("failed to get floor value: %w", err)
 	}
-
-	mutex := v.getMutex(blockID)
-	mutex.Lock()
-	defer mutex.Unlock()
 
 	block, err := v.blockStore.Get(blockID)
 	if err != nil {
@@ -261,6 +273,9 @@ func (v *ValueStore) NewIterator(start, prefix []byte) database.Iterator {
 		return &Iterator{valuestore: v, lastError: database.ErrClosed, closed: true, index: -1}
 	}
 
+	v.mutex.RLock() // Take read lock while loading snapshot
+	defer v.mutex.RUnlock()
+
 	// Take a snapshot of the current state by loading all data now
 	var blockNumbers []uint32
 	var keys [][]byte
@@ -299,8 +314,6 @@ func (v *ValueStore) NewIterator(start, prefix []byte) database.Iterator {
 			return &Iterator{valuestore: v, lastError: err, index: -1}
 		}
 
-		fmt.Printf("Found %d keys and %d values in block %d\n", len(blockKeys), len(blockValues), blockNum)
-
 		// Make copies of keys and values
 		for i := range blockKeys {
 			keys = append(keys, append([]byte(nil), blockKeys[i]...))
@@ -308,42 +321,34 @@ func (v *ValueStore) NewIterator(start, prefix []byte) database.Iterator {
 		}
 	}
 
-	// Create end key if prefix is provided
-	var end []byte
+	// Filter by prefix if needed
 	if prefix != nil {
-		if start == nil || bytes.Compare(start, prefix) < 0 {
-			start = prefix
+		var filteredKeys [][]byte
+		var filteredValues [][]byte
+		for i, key := range keys {
+			if bytes.HasPrefix(key, prefix) {
+				filteredKeys = append(filteredKeys, key)
+				filteredValues = append(filteredValues, values[i])
+			}
 		}
-		end = make([]byte, len(prefix))
-		copy(end, prefix)
-		for i := len(end) - 1; i >= 0; i-- {
-			end[i]++
-			if end[i] != 0 {
-				break
+		keys = filteredKeys
+		values = filteredValues
+	}
+
+	// Sort by key
+	for i := 0; i < len(keys)-1; i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if bytes.Compare(keys[i], keys[j]) > 0 {
+				keys[i], keys[j] = keys[j], keys[i]
+				values[i], values[j] = values[j], values[i]
 			}
 		}
 	}
 
-	// Filter keys based on range
-	var filteredKeys [][]byte
-	var filteredValues [][]byte
-	for i, key := range keys {
-		if bytes.Compare(key, start) < 0 {
-			continue
-		}
-		if end != nil && bytes.Compare(key, end) >= 0 {
-			continue
-		}
-		filteredKeys = append(filteredKeys, key)
-		filteredValues = append(filteredValues, values[i])
-	}
-
 	return &Iterator{
 		valuestore: v,
-		start:      start,
-		end:        end,
-		keys:       filteredKeys,
-		values:     filteredValues,
+		keys:       keys,
+		values:     values,
 		index:      -1,
 	}
 }
