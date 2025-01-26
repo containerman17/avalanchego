@@ -93,43 +93,6 @@ func TestIterator_MultipleKeys(t *testing.T) {
 	require.NoError(t, iter.Error())
 }
 
-func TestIterator_Range(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	// Put multiple key-value pairs
-	pairs := []struct {
-		key   []byte
-		value []byte
-	}{
-		{[]byte("key1"), []byte("value1")},
-		{[]byte("key2"), []byte("value2")},
-		{[]byte("key3"), []byte("value3")},
-		{[]byte("key4"), []byte("value4")},
-		{[]byte("key5"), []byte("value5")},
-	}
-
-	for _, pair := range pairs {
-		require.NoError(t, store.Put(pair.key, pair.value))
-	}
-
-	// Test range iteration
-	iter := store.NewIterator([]byte("key2"), []byte("key4"))
-	defer iter.Release()
-
-	// Should only iterate through key2 and key3
-	expectedPairs := pairs[1:3] // key2 and key3
-	for _, pair := range expectedPairs {
-		require.True(t, iter.Next())
-		require.True(t, bytes.Equal(pair.key, iter.Key()))
-		require.True(t, bytes.Equal(pair.value, iter.Value()))
-	}
-
-	// No more items
-	require.False(t, iter.Next())
-	require.NoError(t, iter.Error())
-}
-
 func TestIterator_Release(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

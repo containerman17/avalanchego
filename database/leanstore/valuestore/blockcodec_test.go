@@ -288,6 +288,135 @@ func TestEmptyBlockPadded(t *testing.T) {
 	require.Nil(t, val)
 }
 
+func TestCorruptedBlocks(t *testing.T) {
+	// Create a valid block first
+	keys := [][]byte{
+		[]byte("apple"),
+		[]byte("banana"),
+	}
+	values := [][]byte{
+		[]byte{1, 0, 0, 0},
+		[]byte{2, 0, 0, 0},
+	}
+
+	validBlock, newBlocks, err := EncodeBlock([]byte{}, keys, values, 40000)
+	require.NoError(t, err)
+	require.Empty(t, newBlocks)
+
+	decoder := NewBlockDecoder()
+
+	tests := []struct {
+		name        string
+		modifyBlock func([]byte) []byte
+		wantErr     string
+	}{
+		{
+			name: "block too short",
+			modifyBlock: func(block []byte) []byte {
+				return block[:1] // Only return first byte
+			},
+			wantErr: "block too short",
+		},
+		{
+			name: "invalid block length",
+			modifyBlock: func(block []byte) []byte {
+				modified := make([]byte, len(block))
+				copy(modified, block)
+				// Set block length larger than actual block
+				modified[0] = 0xFF
+				modified[1] = 0xFF
+				return modified
+			},
+			wantErr: "invalid block length",
+		},
+		{
+			name: "invalid prefix length",
+			modifyBlock: func(block []byte) []byte {
+				modified := make([]byte, len(block))
+				copy(modified, block)
+				// Set prefix length to invalid value
+				modified[2] = byte(len(block))
+				return modified
+			},
+			wantErr: "invalid prefix length in Decode",
+		},
+		{
+			name: "truncated during key length",
+			modifyBlock: func(block []byte) []byte {
+				// Find position after prefix
+				prefixLen := int(block[2])
+				truncatedLen := 4 + prefixLen + 1 // block length (2) + prefix length (1) + prefix + 1 byte
+				modified := make([]byte, truncatedLen)
+				copy(modified, block[:truncatedLen])
+				// Update block length
+				modified[0] = byte(truncatedLen >> 8)
+				modified[1] = byte(truncatedLen)
+				return modified
+			},
+			wantErr: "malformed block: unexpected end while reading key data",
+		},
+		{
+			name: "truncated during key data",
+			modifyBlock: func(block []byte) []byte {
+				prefixLen := int(block[2])
+				pos := 3 + prefixLen // Skip block length (2) + prefix length (1) + prefix
+				keyLen := int(block[pos])
+				truncatedLen := pos + 1 + keyLen/2 // Truncate in middle of key data
+				modified := make([]byte, truncatedLen)
+				copy(modified, block[:truncatedLen])
+				// Update block length
+				modified[0] = byte(truncatedLen >> 8)
+				modified[1] = byte(truncatedLen)
+				return modified
+			},
+			wantErr: "malformed block: unexpected end while reading key data",
+		},
+		{
+			name: "truncated during value length",
+			modifyBlock: func(block []byte) []byte {
+				prefixLen := int(block[2])
+				pos := 3 + prefixLen // Skip block length (2) + prefix length (1) + prefix
+				keyLen := int(block[pos])
+				truncatedLen := pos + 1 + keyLen + 1 // Truncate during value length
+				modified := make([]byte, truncatedLen)
+				copy(modified, block[:truncatedLen])
+				// Update block length
+				modified[0] = byte(truncatedLen >> 8)
+				modified[1] = byte(truncatedLen)
+				return modified
+			},
+			wantErr: "malformed block: unexpected end while reading key data",
+		},
+		{
+			name: "truncated during value data",
+			modifyBlock: func(block []byte) []byte {
+				prefixLen := int(block[2])
+				pos := 3 + prefixLen // Skip block length (2) + prefix length (1) + prefix
+				keyLen := int(block[pos])
+				pos += 1 + keyLen // Skip key length + key data
+				valueLen := int(block[pos])<<8 | int(block[pos+1])
+				truncatedLen := pos + 2 + valueLen/2 // Truncate in middle of value data
+				modified := make([]byte, truncatedLen)
+				copy(modified, block[:truncatedLen])
+				// Update block length
+				modified[0] = byte(truncatedLen >> 8)
+				modified[1] = byte(truncatedLen)
+				return modified
+			},
+			wantErr: "malformed block: unexpected end while reading value data",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			corruptedBlock := tt.modifyBlock(validBlock)
+			_, _, err := decoder.Decode(corruptedBlock)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func BenchmarkBlockDecoderParallel(b *testing.B) {
 	// Create 1000 different blocks
 	numBlocks := 1000

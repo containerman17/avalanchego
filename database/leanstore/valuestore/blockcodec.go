@@ -72,15 +72,18 @@ func (d *BlockDecoder) Decode(block []byte) ([][]byte, [][]byte, error) {
 	scanPos := pos
 	for scanPos < blockUsedLen {
 		if scanPos+1 >= blockUsedLen {
-			break
+			return nil, nil, errors.New("malformed block: unexpected end while reading key length")
 		}
 		keyLen := int(block[scanPos])
 		scanPos++
 		if scanPos+keyLen+2 >= blockUsedLen {
-			break
+			return nil, nil, errors.New("malformed block: unexpected end while reading key data")
 		}
 		totalKeySpace += prefixLen + keyLen
 		valueLen := int(block[scanPos+keyLen])<<8 | int(block[scanPos+keyLen+1])
+		if scanPos+keyLen+2+valueLen > blockUsedLen {
+			return nil, nil, errors.New("malformed block: unexpected end while reading value data")
+		}
 		scanPos += keyLen + 2 + valueLen
 	}
 
@@ -96,10 +99,13 @@ func (d *BlockDecoder) Decode(block []byte) ([][]byte, [][]byte, error) {
 
 	// Decode entries
 	for pos < blockUsedLen {
+		if pos+1 >= blockUsedLen {
+			return nil, nil, errors.New("malformed block: unexpected end while reading key length")
+		}
 		keyLen := int(block[pos])
 		pos++
 		if pos+keyLen+2 >= blockUsedLen {
-			break
+			return nil, nil, errors.New("malformed block: unexpected end while reading key data")
 		}
 
 		key := d.keyBuf[keyBufPos : keyBufPos+prefixLen+keyLen]
@@ -111,7 +117,7 @@ func (d *BlockDecoder) Decode(block []byte) ([][]byte, [][]byte, error) {
 		valueLen := int(block[pos])<<8 | int(block[pos+1])
 		pos += 2
 		if pos+valueLen > blockUsedLen {
-			break
+			return nil, nil, errors.New("malformed block: unexpected end while reading value data")
 		}
 
 		value := block[pos : pos+valueLen]
@@ -119,6 +125,10 @@ func (d *BlockDecoder) Decode(block []byte) ([][]byte, [][]byte, error) {
 
 		d.keys = append(d.keys, key)
 		d.values = append(d.values, value)
+	}
+
+	if len(d.keys) != len(d.values) {
+		return nil, nil, errors.New("corrupted block: key count does not match value count")
 	}
 
 	return d.keys, d.values, nil
@@ -174,6 +184,8 @@ func EncodeBlock(originalBlock []byte, keys [][]byte, values [][]byte, blockSize
 			return nil, nil, fmt.Errorf("failed to pack subsequent block: %w", err)
 		}
 		if keysPacked == 0 {
+			fmt.Println("remainingKeys", debugDescribeBytesSlices(remainingKeys))
+			fmt.Println("remainingValues", debugDescribeBytesSlices(remainingValues))
 			return nil, nil, errors.New("failed to pack keys: zero keys packed")
 		}
 
@@ -187,6 +199,20 @@ func EncodeBlock(originalBlock []byte, keys [][]byte, values [][]byte, blockSize
 	}
 
 	return firstBlock, newBlocks, nil
+}
+
+func debugDescribeBytesSlices(slices [][]byte) string {
+	maxLen := 0
+	minLen := len(slices[0])
+	for _, slice := range slices {
+		if len(slice) > maxLen {
+			maxLen = len(slice)
+		}
+		if len(slice) < minLen {
+			minLen = len(slice)
+		}
+	}
+	return fmt.Sprintf("%d slices with len from %d to %d", len(slices), minLen, maxLen)
 }
 
 func scanBlockAddKeys(originalBlock []byte, keys [][]byte, values [][]byte) ([][]byte, [][]byte) {

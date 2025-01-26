@@ -298,6 +298,9 @@ func (v *ValueStore) NewIterator(start, prefix []byte) database.Iterator {
 		if err != nil {
 			return &Iterator{valuestore: v, lastError: err, index: -1}
 		}
+
+		fmt.Printf("Found %d keys and %d values in block %d\n", len(blockKeys), len(blockValues), blockNum)
+
 		// Make copies of keys and values
 		for i := range blockKeys {
 			keys = append(keys, append([]byte(nil), blockKeys[i]...))

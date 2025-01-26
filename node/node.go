@@ -34,6 +34,7 @@ import (
 	"github.com/ava-labs/avalanchego/chains/atomic"
 	"github.com/ava-labs/avalanchego/config/node"
 	"github.com/ava-labs/avalanchego/database"
+	"github.com/ava-labs/avalanchego/database/leanstore"
 	"github.com/ava-labs/avalanchego/database/leveldb"
 	"github.com/ava-labs/avalanchego/database/memdb"
 	"github.com/ava-labs/avalanchego/database/meterdb"
@@ -777,9 +778,15 @@ func (n *Node) initDatabase() error {
 		if err != nil {
 			return fmt.Errorf("couldn't create %s at %s: %w", pebbledb.Name, dbPath, err)
 		}
+	case leanstore.Name:
+		dbPath := filepath.Join(n.Config.DatabaseConfig.Path, "leanstore")
+		n.DB, err = leanstore.New(dbPath, n.Config.DatabaseConfig.Config, n.Log, dbRegisterer)
+		if err != nil {
+			return fmt.Errorf("couldn't create %s at %s: %w", leanstore.Name, dbPath, err)
+		}
 	default:
 		return fmt.Errorf(
-			"db-type was %q but should have been one of {%s, %s, %s}",
+			"db-type was %q but should have been one of {%s, %s, %s, %s}",
 			n.Config.DatabaseConfig.Name,
 			leveldb.Name,
 			memdb.Name,
