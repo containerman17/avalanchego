@@ -1,10 +1,10 @@
 # Peer Version Discovery Tool
 
-A proof-of-concept tool to discover and analyze Avalanche subnet validator versions using multiple approaches.
+A proof-of-concept tool to discover and analyze Avalanche subnet validator versions using P2P connections.
 
 ## Overview
 
-This repository contains several implementations for discovering Avalanche subnet validator versions:
+This repository contains implementations for discovering Avalanche subnet validator versions:
 
 1. **RPC-based discovery** - Uses the info API to query connected peers
 2. **P2P-based discovery** - Connects directly to peers using the Avalanche gossip protocol
@@ -16,7 +16,6 @@ This repository contains several implementations for discovering Avalanche subne
 - `advanced_main.go` - Advanced version that queries P-Chain for all validators
 - `p2p_discovery.go` - Full P2P implementation that connects via gossip protocol
 - `simple_p2p.go` - Simplified P2P version using test peer utilities
-- `demo.go` - Demo version showing typical output
 
 ## P2P Discovery Approach
 
@@ -47,7 +46,7 @@ The Avalanche P2P protocol uses:
 - **Port 9651** for P2P connections (9650 for RPC)
 
 The handshake message includes:
-- Network ID (mainnet = 1)
+- Network ID (mainnet = 1)  
 - Node version (major.minor.patch)
 - Tracked subnets
 - Supported/objected ACPs
@@ -106,13 +105,6 @@ go run ./cmd/peerVersionDiscovery/simple_p2p.go
 
 # Full P2P implementation
 go run ./cmd/peerVersionDiscovery/p2p_discovery.go
-```
-
-### Demo Version
-
-```bash
-# Shows typical output without network access
-go run ./cmd/peerVersionDiscovery/demo.go
 ```
 
 ## Limitations
