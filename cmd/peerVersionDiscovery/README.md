@@ -1,120 +1,132 @@
 # Peer Version Discovery Tool
 
-A simple proof-of-concept tool to discover and analyze Avalanche subnet validator versions.
+A proof-of-concept tool to discover and analyze Avalanche subnet validator versions using multiple approaches.
 
 ## Overview
 
-This tool connects to an Avalanche node via RPC and discovers all peers that are tracking a specific subnet. It then displays their avalanchego versions and provides a summary of version distribution.
+This repository contains several implementations for discovering Avalanche subnet validator versions:
 
-## Features
-
-- Connects to local or remote Avalanche node via RPC API
-- Discovers all peers tracking a specific subnet
-- Displays validator node IDs, IPs, and versions
-- Shows version distribution and identifies outdated nodes
-- Works with mainnet
+1. **RPC-based discovery** - Uses the info API to query connected peers
+2. **P2P-based discovery** - Connects directly to peers using the Avalanche gossip protocol
+3. **Hybrid approach** - Combines P-Chain queries with P2P connections
 
 ## Files
 
-- `main.go` - Basic version that shows connected peers tracking the subnet
-- `advanced_main.go` - Advanced version that queries P-Chain for all validators and shows which ones we're connected to
+- `main.go` - Basic RPC version that shows connected peers tracking the subnet
+- `advanced_main.go` - Advanced version that queries P-Chain for all validators
+- `p2p_discovery.go` - Full P2P implementation that connects via gossip protocol
+- `simple_p2p.go` - Simplified P2P version using test peer utilities
+- `demo.go` - Demo version showing typical output
 
-## Usage
+## P2P Discovery Approach
+
+The P2P approach works by:
+
+1. **Creating TLS certificates** - Generate a node identity for handshaking
+2. **Connecting to bootstrap nodes** - Start with known mainnet nodes
+3. **Performing handshakes** - Exchange version information via the Avalanche protocol
+4. **Requesting peer lists** - Get more peers tracking the target subnet
+5. **Connecting to subnet validators** - Connect specifically to subnet validators
+
+### Running P2P Discovery
+
+```bash
+# Simple P2P version (connects to bootstrap nodes)
+go run ./cmd/peerVersionDiscovery/simple_p2p.go
+
+# Full P2P version (attempts to discover subnet validators)
+go run ./cmd/peerVersionDiscovery/p2p_discovery.go
+```
+
+### P2P Protocol Details
+
+The Avalanche P2P protocol uses:
+- **TLS 1.3** for secure connections
+- **Ed25519** certificates for node identity
+- **Protobuf** messages for communication
+- **Port 9651** for P2P connections (9650 for RPC)
+
+The handshake message includes:
+- Network ID (mainnet = 1)
+- Node version (major.minor.patch)
+- Tracked subnets
+- Supported/objected ACPs
+
+### Example P2P Code Structure
+
+```go
+// 1. Create TLS certificate
+tlsCert, _ := staking.NewTLSCert()
+
+// 2. Connect to peer
+conn, _ := net.Dial("tcp", "peer-ip:9651")
+
+// 3. Upgrade to TLS
+tlsConn := tls.Client(conn, tlsConfig)
+
+// 4. Send handshake
+handshake := createHandshakeMessage(subnetID)
+tlsConn.Write(handshake)
+
+// 5. Parse response for version
+response := readResponse(tlsConn)
+version := parseVersion(response)
+```
+
+## Complete Solution
+
+For a production implementation to get ALL subnet validator versions:
+
+1. **Query P-Chain** for the complete validator set
+2. **Use DHT/Kademlia** to discover peer IPs
+3. **Connect via P2P** to each validator
+4. **Handle reconnections** and retries
+5. **Aggregate data** from multiple vantage points
+
+## Running the Tools
 
 ### Prerequisites
 
-You need to have an Avalanche node running with the info API enabled. By default, the tool connects to `127.0.0.1:9651`.
+- Go 1.21+
+- Network access to Avalanche mainnet
+- For RPC: Running node with info API enabled
+- For P2P: Direct TCP access to port 9651
 
-### Running the basic tool
-
-From the avalanchego repository root:
+### Basic RPC Version
 
 ```bash
 go run ./cmd/peerVersionDiscovery/main.go
 ```
 
-### Running the advanced tool
+### P2P Versions
 
 ```bash
-go run ./cmd/peerVersionDiscovery/advanced_main.go
+# Simple P2P (test utility based)
+go run ./cmd/peerVersionDiscovery/simple_p2p.go
+
+# Full P2P implementation
+go run ./cmd/peerVersionDiscovery/p2p_discovery.go
 ```
 
-Or with a custom node URL:
+### Demo Version
 
 ```bash
-AVALANCHE_NODE_URL="http://your-node:9650" go run ./cmd/peerVersionDiscovery/advanced_main.go
-```
-
-### Example Output (Basic Version)
-
-```
-Avalanche Subnet Peer Version Discovery
-======================================
-Target Subnet: 23dqTMHK186m4Rzcn1ukJdmHy13nqido4LjTp5Kh9W6qBKaFib
-
-Connecting to node at: http://127.0.0.1:9651
-Connected to node: NodeID-xxx
-Node version: avalanche/1.11.x
-
-Fetching peer information...
-Total peers: 250
-
-Subnet 23dqTMHK186m4Rzcn1ukJdmHy13nqido4LjTp5Kh9W6qBKaFib Validators:
-================================================================================
-Node ID                                      IP                   Version
---------------------------------------------------------------------------------
-NodeID-xxx                                   1.2.3.4:9651         avalanche/1.11.0
-...
-
-Version distribution:
-  avalanche/1.11.0: 5 nodes
-  avalanche/1.11.1: 10 nodes
-
-WARNING: 5 nodes (33%) are running versions different from avalanche/1.11.1
-```
-
-### Example Output (Advanced Version)
-
-```
-Advanced Subnet Validator Discovery (with P-Chain)
-=================================================
-Target Subnet: 23dqTMHK186m4Rzcn1ukJdmHy13nqido4LjTp5Kh9W6qBKaFib
-
-Querying P-Chain for subnet validators...
-
-Found 20 validators for subnet 23dqTMHK186m4Rzcn1ukJdmHy13nqido4LjTp5Kh9W6qBKaFib
-
-Validator Details:
-====================================================================================================
-Node ID                                      Status               IP                   Version
-----------------------------------------------------------------------------------------------------
-NodeID-xxx                                   Connected            1.2.3.4:9651         avalanche/1.11.0
-NodeID-yyy                                   Not Connected        Unknown              Unknown
-...
-
-Total subnet validators: 20
-Connected to: 12 (60%)
-Not connected to: 8
-
-Version distribution (connected validators only):
-  avalanche/1.11.0: 5 nodes
-  avalanche/1.11.1: 7 nodes
+# Shows typical output without network access
+go run ./cmd/peerVersionDiscovery/demo.go
 ```
 
 ## Limitations
 
-- This is a proof of concept - very simple and dirty implementation
-- Only shows peers that your node is connected to (not all subnet validators)
-- Requires access to a node with info API enabled
-- Does not query validators directly, only through connected peers
-- The advanced version shows all validators but can only get version info for connected ones
+- P2P discovery requires direct network access (may be blocked by firewalls)
+- Bootstrap nodes may not track all subnets
+- Need to implement peer discovery to find subnet-specific validators
+- Simplified message parsing (production would need full protobuf parsing)
 
 ## Future Improvements
 
-To get ALL subnet validators (not just connected peers):
-1. Query the P-Chain to get the full validator set for the subnet ✓ (done in advanced version)
-2. Implement direct P2P connections to all validators
-3. Use the Avalanche network protocol to handshake and get version info
-4. Add support for multiple subnets
-5. Export data in structured format (JSON, CSV)
-6. Aggregate data from multiple nodes to get more complete coverage
+1. Implement Kademlia DHT for peer discovery
+2. Add GetPeerList message handling
+3. Parse full protobuf responses properly
+4. Cache discovered peers
+5. Add retry logic for failed connections
+6. Support multiple subnets in one run
