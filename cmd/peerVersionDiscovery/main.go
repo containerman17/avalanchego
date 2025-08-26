@@ -54,11 +54,11 @@ func main() {
 	defer cancel()
 
 	// Get node info first
-	nodeInfoReply, err := infoClient.GetNodeID(ctx)
+	nodeID, _, err := infoClient.GetNodeID(ctx)
 	if err != nil {
 		log.Fatalf("Failed to get node ID: %v", err)
 	}
-	fmt.Printf("Connected to node: %s\n", nodeInfoReply.NodeID)
+	fmt.Printf("Connected to node: %s\n", nodeID)
 
 	// Get network info
 	networkInfo, err := infoClient.GetNodeVersion(ctx)
