@@ -69,6 +69,12 @@ func (sd *SubnetDiscovery) GetAllPeers() []*PeerInfo {
 	return result
 }
 
+func (sd *SubnetDiscovery) GetPeerCount() int {
+	sd.mu.RLock()
+	defer sd.mu.RUnlock()
+	return len(sd.peers)
+}
+
 // CreateHandshakeHandler creates a message handler that captures peer information
 func CreateHandshakeHandler(sd *SubnetDiscovery) router.InboundHandler {
 	return router.InboundHandlerFunc(func(_ context.Context, msg message.InboundMessage) {
