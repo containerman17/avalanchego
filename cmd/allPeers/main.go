@@ -48,6 +48,7 @@ type DiscoveredPeer struct {
 
 // getOutboundIP attempts to get our external IP by dialing a well-known address
 func getOutboundIP() netip.Addr {
+
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
 		return netip.IPv4Unspecified()
@@ -75,8 +76,8 @@ func newDiscoveryNetwork() *discoveryNetwork {
 	return &discoveryNetwork{
 		knownPeers: make(map[ids.NodeID]*ips.ClaimedIPPort),
 		peerFilter: filter,
-		peerSalt:   []byte("discovery"),
-		maxPeers:   100,
+		peerSalt:   []byte("discovery i2yb2b323e3"),
+		maxPeers:   3000,
 	}
 }
 
@@ -92,14 +93,18 @@ func (n *discoveryNetwork) Track(peers []*ips.ClaimedIPPort) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	newPeers := 0
 	for _, peer := range peers {
+		// fmt.Printf("peer %+v\n", peer)
 		nodeID := ids.NodeIDFromCert(peer.Cert)
 		if _, exists := n.knownPeers[nodeID]; !exists && len(n.knownPeers) < n.maxPeers {
 			n.knownPeers[nodeID] = peer
 			bloom.Add(n.peerFilter, nodeID[:], n.peerSalt)
-			fmt.Printf("  📍 Network: Tracked new peer %s at %s\n", nodeID, peer.AddrPort)
+			// fmt.Printf("  📍 Network: Tracked new peer %s at %s\n", nodeID, peer.AddrPort)
+			newPeers++
 		}
 	}
+	fmt.Printf("  📍 Network: Tracked %d new peers\n", newPeers)
 
 	fmt.Printf("  📊 Network: Now tracking %d peers\n", len(n.knownPeers))
 	return nil
@@ -228,6 +233,15 @@ func startDiscoveryPeer(
 	}
 	myNodeID := ids.NodeIDFromCert(parsedCert)
 
+	// Parse the subnet IDs we want to track
+	subnet1, _ := ids.FromString("h7egyVb6fKHMDpVaEsTEcy7YaEnXrayxZS4A1AEU4pyBzmwGp")
+	subnet2, _ := ids.FromString("nQCwF6V9y8VFjvMuPeQVWWYn6ba75518Dpf6ZMWZNb3NyTA94")
+
+	// Create set of tracked subnets
+	trackedSubnets := set.Set[ids.ID]{}
+	trackedSubnets.Add(subnet1)
+	trackedSubnets.Add(subnet2)
+
 	// Create peer configuration
 	config := &peer.Config{
 		Metrics:              metrics,
@@ -238,7 +252,7 @@ func startDiscoveryPeer(
 		Router:               msgHandler,
 		VersionCompatibility: version.GetCompatibility(upgrade.InitiallyActiveTime),
 		MyNodeID:             myNodeID,
-		MySubnets:            set.Set[ids.ID]{},
+		MySubnets:            trackedSubnets, // Set our tracked subnets here
 		Beacons:              validators.NewManager(),
 		Validators:           validators.NewManager(),
 		NetworkID:            networkID,
@@ -337,6 +351,13 @@ func main() {
 	myNodeID := ids.NodeIDFromCert(parsedCert)
 	fmt.Printf("🔑 Our consistent NodeID: %s\n", myNodeID)
 
+	// Print the subnets we're tracking
+	subnet1, _ := ids.FromString("h7egyVb6fKHMDpVaEsTEcy7YaEnXrayxZS4A1AEU4pyBzmwGp")
+	subnet2, _ := ids.FromString("nQCwF6V9y8VFjvMuPeQVWWYn6ba75518Dpf6ZMWZNb3NyTA94")
+	fmt.Printf("🌐 We are tracking subnets:\n")
+	fmt.Printf("   - %s\n", subnet1)
+	fmt.Printf("   - %s\n", subnet2)
+
 	// Track discovered peers
 	discoveredPeers := make(map[ids.NodeID]*DiscoveredPeer)
 	var discoveredMutex sync.Mutex
@@ -349,7 +370,7 @@ func main() {
 
 	// Get bootstrap nodes
 	fmt.Println("📡 Loading bootstrap nodes...")
-	bootstrappers := genesis.SampleBootstrappers(constants.FujiID, 20) // Get Fuji testnet bootstrappers
+	bootstrappers := genesis.SampleBootstrappers(constants.MainnetID, 20) // Get Fuji testnet bootstrappers
 	for _, b := range bootstrappers {
 		ipQueue = append(ipQueue, b.IP)
 		fmt.Printf("  📍 Bootstrap: %s at %s\n", b.ID, b.IP)
@@ -389,15 +410,16 @@ func main() {
 
 	for {
 		round++
-		// Take up to 20 IPs per round
-		maxPerRound := 20
+		// Take up to 10 IPs per round
+		maxPerRound := 10
 		if len(ipQueue) < maxPerRound {
 			maxPerRound = len(ipQueue)
 		}
 
 		if maxPerRound == 0 {
-			fmt.Println("\n⚠️  No more IPs in queue. Discovery complete.")
-			break
+			fmt.Printf("\n⚠️  No more IPs in queue. Waiting for more peers... (Round %d)\n", round)
+			time.Sleep(10 * time.Second)
+			continue
 		}
 
 		currentQueue := ipQueue[:maxPerRound]
@@ -405,54 +427,134 @@ func main() {
 
 		fmt.Printf("\n🔄 Round %d: Processing %d IPs (%d remaining in queue)\n", round, len(currentQueue), len(ipQueue))
 
+		// Create a wait group for parallel connections
+		var wg sync.WaitGroup
+
+		// Create channels for results
+		type connectionResult struct {
+			ip      netip.AddrPort
+			success bool
+			peer    *DiscoveredPeer
+			newIPs  []netip.AddrPort
+		}
+		results := make(chan connectionResult, len(currentQueue))
+
+		// Process connections in parallel
 		for i, ip := range currentQueue {
 			if seenIPs.Contains(ip) {
 				continue
 			}
 			seenIPs.Add(ip)
 
-			fmt.Printf("\n🔗 [%d/%d] Attempting connection to %s...\n", i+1, len(currentQueue), ip)
+			wg.Add(1)
+			go func(idx int, addr netip.AddrPort) {
+				defer wg.Done()
 
-			// Try to connect
-			connectCtx, connectCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				fmt.Printf("🔗 [%d/%d] Starting connection to %s...\n", idx+1, len(currentQueue), addr)
 
-			p, err := startDiscoveryPeer(connectCtx, ip, constants.FujiID, network, msgHandler, tlsCert)
-			connectCancel()
+				// Try to connect
+				connectCtx, connectCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer connectCancel()
 
-			if err != nil {
-				fmt.Printf("  ❌ Failed: %v\n", err)
-				failureCount++
-				continue
-			}
+				p, err := startDiscoveryPeer(connectCtx, addr, constants.MainnetID, network, msgHandler, tlsCert)
+				if err != nil {
+					fmt.Printf("  ❌ [%s] Failed: %v\n", addr, err)
+					results <- connectionResult{ip: addr, success: false}
+					return
+				}
 
-			successCount++
+				// Get tracked subnets from peer
+				trackedSubnets := p.TrackedSubnets()
+				subnetIDs := make([]ids.ID, 0, trackedSubnets.Len())
+				for subnet := range trackedSubnets {
+					subnetIDs = append(subnetIDs, subnet)
+				}
 
-			// Store peer info
-			discoveredMutex.Lock()
-			discoveredPeers[p.ID()] = &DiscoveredPeer{
-				NodeID:   p.ID(),
-				IP:       ip,
-				Version:  p.Version().String(),
-				LastSeen: time.Now(),
-			}
-			discoveredMutex.Unlock()
+				peer := &DiscoveredPeer{
+					NodeID:         p.ID(),
+					IP:             addr,
+					Version:        p.Version().String(),
+					TrackedSubnets: subnetIDs,
+					LastSeen:       time.Now(),
+				}
 
-			fmt.Printf("  ✅ Connected! Version: %s\n", p.Version())
+				fmt.Printf("  ✅ [%s] Connected! Version: %s\n", addr, p.Version())
+				if len(subnetIDs) > 0 {
+					// Check if peer tracks our subnets
+					tracksOurSubnets := false
+					for _, subnet := range subnetIDs {
+						if subnet.String() == "h7egyVb6fKHMDpVaEsTEcy7YaEnXrayxZS4A1AEU4pyBzmwGp" ||
+							subnet.String() == "nQCwF6V9y8VFjvMuPeQVWWYn6ba75518Dpf6ZMWZNb3NyTA94" {
+							tracksOurSubnets = true
+							break
+						}
+					}
 
-			// Give time for message exchange
-			time.Sleep(2 * time.Second)
+					if tracksOurSubnets {
+						fmt.Printf("  🎯 [%s] TRACKS OUR SUBNETS! Subnets: %v\n", addr, subnetIDs)
+					} else if len(subnetIDs) > 1 {
+						fmt.Printf("  🌐 [%s] Tracking %d other subnet(s)\n", addr, len(subnetIDs))
+					}
+				}
 
-			// Request peer list
-			fmt.Println("  📮 Requesting peer list...")
-			p.StartSendGetPeerList()
+				// Give time for message exchange
+				time.Sleep(2 * time.Second)
 
-			// Wait for response
-			time.Sleep(5 * time.Second)
+				// Request peer list
+				p.StartSendGetPeerList()
 
-			// Close connection
-			p.StartClose()
-			p.AwaitClosed(context.Background())
+				// Wait for response
+				time.Sleep(3 * time.Second)
+
+				// Collect new IPs before closing
+				// Note: In real implementation, we'd capture these from the PeerList message
+				newIPs := []netip.AddrPort{}
+
+				// Close connection
+				p.StartClose()
+				p.AwaitClosed(context.Background())
+
+				results <- connectionResult{
+					ip:      addr,
+					success: true,
+					peer:    peer,
+					newIPs:  newIPs,
+				}
+			}(i, ip)
 		}
+
+		// Wait for all connections to complete
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+
+		// Process results as they come in
+		roundSuccess := 0
+		roundFailure := 0
+		for result := range results {
+			if result.success {
+				roundSuccess++
+				successCount++
+
+				// Store peer info
+				discoveredMutex.Lock()
+				discoveredPeers[result.peer.NodeID] = result.peer
+				discoveredMutex.Unlock()
+
+				// Add new IPs to queue
+				for _, newIP := range result.newIPs {
+					if !seenIPs.Contains(newIP) {
+						ipQueue = append(ipQueue, newIP)
+					}
+				}
+			} else {
+				roundFailure++
+				failureCount++
+			}
+		}
+
+		fmt.Printf("\n📊 Round %d complete - Success: %d, Failures: %d\n", round, roundSuccess, roundFailure)
 
 		// Print stats
 		totalAttempts := successCount + failureCount
@@ -462,11 +564,7 @@ func main() {
 		fmt.Printf("📊 Discovered peers: %d, IPs in queue: %d\n", len(discoveredPeers), len(ipQueue))
 
 		// Take a break between rounds
-		if len(ipQueue) > 0 {
-			fmt.Println("\n⏳ Waiting 10 seconds before next round...")
-			time.Sleep(10 * time.Second)
-		}
+		fmt.Println("\n⏳ Waiting 10 seconds before next round...")
+		time.Sleep(10 * time.Second)
 	}
-
-	fmt.Printf("\n✅ Discovery complete! Total peers discovered: %d\n", len(discoveredPeers))
 }
