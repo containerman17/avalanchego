@@ -59,9 +59,9 @@ func (n *discoveryNetwork) Disconnected(peerID ids.NodeID) {
 }
 
 func (n *discoveryNetwork) KnownPeers() ([]byte, []byte) {
-	// Return empty bloom filter to get ALL peers without filtering
-	emptyFilter, _ := bloom.New(3, 256)
-	return emptyFilter.Marshal(), []byte("discovery")
+	// Return our ACTUAL known peers so nodes only share NEW ones
+	// This is more efficient and honest
+	return n.peerStore.GetBloomFilter()
 }
 
 func (n *discoveryNetwork) Peers(

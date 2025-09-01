@@ -36,12 +36,12 @@ func main() {
 	fmt.Printf("🔑 Our NodeID: %s\n", myNodeID)
 
 	// Setup tracked subnets
-	// subnet1, _ := ids.FromString("h7egyVb6fKHMDpVaEsTEcy7YaEnXrayxZS4A1AEU4pyBzmwGp")
+	subnet1, _ := ids.FromString("23dqTMHK186m4Rzcn1ukJdmHy13nqido4LjTp5Kh9W6qBKaFib")
 	// subnet2, _ := ids.FromString("nQCwF6V9y8VFjvMuPeQVWWYn6ba75518Dpf6ZMWZNb3NyTA94")
 	// subnet3, _ := ids.FromString("jmLmezoViv3F72XLzpdmSNk3qLEGb72g5EYkp3ij4wHXPF2KN")
 	// subnet4, _ := ids.FromString("2qJPnDkDH6hn3PVzxzkUdTqDD1HeAnTT8FL4t2BJagc2iuq8j7")
 	trackedSubnets := set.Set[ids.ID]{}
-	// trackedSubnets.Add(subnet1)
+	trackedSubnets.Add(subnet1)
 	// trackedSubnets.Add(subnet2)
 	// trackedSubnets.Add(subnet3)
 	// trackedSubnets.Add(subnet4)
@@ -79,7 +79,7 @@ func main() {
 	// Main loop
 	for {
 		// Get batch of peers with oldest contact time (older than 1 minute)
-		peers := peerStore.GetOldestPeers(batchSize, 1*time.Minute)
+		peers := peerStore.GetOldestPeers(batchSize, 30*time.Second)
 		if len(peers) == 0 {
 			fmt.Println("⚠️  No peers available (or all contacted recently)")
 			time.Sleep(10 * time.Second)
