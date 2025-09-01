@@ -74,7 +74,7 @@ func main() {
 	fmt.Println("================================================\n")
 
 	// Batch size for parallel processing
-	batchSize := 500
+	batchSize := 1000
 
 	// Main loop
 	for {
