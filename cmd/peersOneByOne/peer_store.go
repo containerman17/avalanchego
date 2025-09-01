@@ -22,7 +22,8 @@ type PeerInfo struct {
 	IP             string    `json:"ip"`
 	Version        string    `json:"version,omitempty"`
 	TrackedSubnets []string  `json:"trackedSubnets,omitempty"`
-	LastContacted  time.Time `json:"lastContacted"`
+	LastAttempted  time.Time `json:"lastAttempted"`  // When we last tried to contact
+	LastSeenOnline time.Time `json:"lastSeenOnline"` // When we last successfully contacted
 }
 
 type PeerStore struct {
@@ -128,19 +129,20 @@ func (ps *PeerStore) AddPeer(nodeID ids.NodeID, ip netip.AddrPort, version strin
 		IP:             ip.String(),
 		Version:        version,
 		TrackedSubnets: subnetStrs,
-		LastContacted:  time.Time{}, // Zero time for new peers
+		LastAttempted:  time.Time{}, // Zero time for new peers
+		LastSeenOnline: time.Time{}, // Zero time for new peers
 	}
 
 	ps.peers[nodeIDStr] = peer
 	bloom.Add(ps.bloomFilter, nodeID[:], []byte(bloomSalt))
 }
 
-func (ps *PeerStore) UpdateLastContacted(nodeID ids.NodeID) {
+func (ps *PeerStore) UpdateLastAttempted(nodeID ids.NodeID) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	if peer, exists := ps.peers[nodeID.String()]; exists {
-		peer.LastContacted = time.Now()
+		peer.LastAttempted = time.Now()
 	}
 }
 
@@ -151,7 +153,7 @@ func (ps *PeerStore) UpdatePeerInfo(nodeID ids.NodeID, version string, trackedSu
 	nodeIDStr := nodeID.String()
 	if peer, exists := ps.peers[nodeIDStr]; exists {
 		peer.Version = version
-		peer.LastContacted = time.Now()
+		peer.LastSeenOnline = time.Now()
 
 		// Update tracked subnets, filtering out empty (primary network) ID
 		subnetStrs := []string{}
@@ -170,20 +172,37 @@ func (ps *PeerStore) UpdatePeerInfo(nodeID ids.NodeID, version string, trackedSu
 	}
 }
 
-func (ps *PeerStore) GetOldestPeer() *PeerInfo {
+func (ps *PeerStore) GetOldestPeers(n int, olderThan time.Duration) []*PeerInfo {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
-	var oldest *PeerInfo
+	now := time.Now()
+	cutoffTime := now.Add(-olderThan)
+
+	// Convert map to slice and filter by olderThan
+	eligiblePeers := make([]*PeerInfo, 0, len(ps.peers))
 	for _, peer := range ps.peers {
-		if oldest == nil || peer.LastContacted.Before(oldest.LastContacted) {
-			// Create a copy to avoid race conditions
+		// Only include peers that haven't been attempted recently
+		if peer.LastAttempted.Before(cutoffTime) {
 			peerCopy := *peer
-			oldest = &peerCopy
+			eligiblePeers = append(eligiblePeers, &peerCopy)
 		}
 	}
 
-	return oldest
+	// Sort by LastAttempted (oldest first)
+	for i := 0; i < len(eligiblePeers)-1; i++ {
+		for j := i + 1; j < len(eligiblePeers); j++ {
+			if eligiblePeers[j].LastAttempted.Before(eligiblePeers[i].LastAttempted) {
+				eligiblePeers[i], eligiblePeers[j] = eligiblePeers[j], eligiblePeers[i]
+			}
+		}
+	}
+
+	// Return up to n peers
+	if n > len(eligiblePeers) {
+		n = len(eligiblePeers)
+	}
+	return eligiblePeers[:n]
 }
 
 func (ps *PeerStore) HasPeer(nodeID ids.NodeID) bool {
