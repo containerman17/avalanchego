@@ -132,9 +132,7 @@ func main() {
 				}
 			}
 
-			if len(peerInfo.NewPeerIPs) > 0 {
-				fmt.Printf("  📍 Discovered %d new peers\n", len(peerInfo.NewPeerIPs))
-			}
+			fmt.Printf("  📍 Discovered %d new peers\n", len(peerInfo.NewPeerIPs))
 		}
 
 		// Save updated peer list
