@@ -74,12 +74,12 @@ func main() {
 	fmt.Println("================================================\n")
 
 	// Batch size for parallel processing
-	batchSize := 1000
+	batchSize := 400
 
 	// Main loop
 	for {
 		// Get batch of peers with oldest contact time (older than 1 minute)
-		peers := peerStore.GetOldestPeers(batchSize, 30*time.Second)
+		peers := peerStore.GetOldestPeers(batchSize, 60*time.Second)
 		if len(peers) == 0 {
 			fmt.Println("⚠️  No peers available (or all contacted recently)")
 			time.Sleep(10 * time.Second)
