@@ -245,6 +245,9 @@ type ManagerConfig struct {
 	ChainDataDir string
 
 	Subnets *Subnets
+
+	// If set, the P-chain is not started and only this chain is created.
+	IsolatedL1 *IsolatedL1
 }
 
 type manager struct {
@@ -1515,6 +1518,15 @@ func (m *manager) registerBootstrappedHealthChecks() error {
 
 // Starts chain creation loop to process queued chains
 func (m *manager) StartChainCreator(platformParams ChainParameters) error {
+	if m.IsolatedL1 != nil {
+		m.validatorState = m.IsolatedL1
+		close(m.unblockChainCreatorCh)
+		m.QueueChainCreation(m.IsolatedL1.Chain)
+		m.chainCreatorExited.Add(1)
+		go m.dispatchChainCreator()
+		return m.registerBootstrappedHealthChecks()
+	}
+
 	// Add the P-Chain to the Primary Network
 	sb, _ := m.Subnets.GetOrCreate(constants.PrimaryNetworkID)
 	sb.AddChain(platformParams.ID)

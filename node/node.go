@@ -238,6 +238,16 @@ func New(
 		logger.Warn("sybil control is not enforced")
 		n.vdrs = newOverriddenManager(constants.PrimaryNetworkID, n.vdrs)
 	}
+	if l1 := n.Config.IsolatedL1; l1 != nil {
+		// No P-chain will populate the validators, so use the static set.
+		for _, subnetID := range []ids.ID{constants.PrimaryNetworkID, l1.Chain.SubnetID} {
+			for nodeID, vdr := range l1.Validators {
+				if err := n.vdrs.AddStaker(subnetID, nodeID, vdr.PublicKey, l1.Chain.ID, vdr.Weight); err != nil {
+					return nil, fmt.Errorf("couldn't add isolated L1 validator: %w", err)
+				}
+			}
+		}
+	}
 	if err := n.initResourceManager(); err != nil {
 		return nil, fmt.Errorf("problem initializing resource manager: %w", err)
 	}
@@ -1172,6 +1182,7 @@ func (n *Node) initChainManager(avaxAssetID ids.ID) error {
 			Tracer:                                  n.tracer,
 			ChainDataDir:                            n.Config.ChainDataDir,
 			Subnets:                                 subnets,
+			IsolatedL1:                              n.Config.IsolatedL1,
 		},
 	)
 	if err != nil {
